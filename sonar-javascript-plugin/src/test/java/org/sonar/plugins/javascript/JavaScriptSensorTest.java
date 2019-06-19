@@ -221,7 +221,7 @@ public class JavaScriptSensorTest {
   public void should_add_error_to_context_but_not_fail_analysis_with_technical_error() {
     JavaScriptCheck check = new ExceptionRaisingCheck(new NullPointerException("NPE forcibly raised by check class"));
 
-    InputFile file = inputFile("file.js");
+    InputFile file = inputFile("file0.js");
     createSensor().analyseFiles(context, ImmutableList.of((TreeVisitor) check), ImmutableList.of(file), executor, progressReport);
     assertThat(context.allAnalysisErrors()).hasSize(1);
 
@@ -230,7 +230,7 @@ public class JavaScriptSensorTest {
 
   @Test
   public void should_not_add_error_to_context_when_analysis_raises_no_issue() {
-    inputFile("file.js");
+    inputFile("file1.js");
 
     createSensor().execute(context);
 
@@ -242,7 +242,7 @@ public class JavaScriptSensorTest {
 
   @Test
   public void should_not_add_error_to_context_when_analysis_raises_issues() {
-    inputFile("file.js");
+    inputFile("file2.js");
 
     ActiveRules activeRules = (new ActiveRulesBuilder())
       .create(RuleKey.of(CheckList.REPOSITORY_KEY, "MissingNewlineAtEndOfFile"))
@@ -260,7 +260,7 @@ public class JavaScriptSensorTest {
 
   @Test
   public void should_save_issue() throws Exception {
-    inputFile("file.js");
+    inputFile("file3.js");
 
     ActiveRules activeRules = (new ActiveRulesBuilder())
       .create(RuleKey.of(CheckList.REPOSITORY_KEY, "MissingNewlineAtEndOfFile"))
@@ -277,7 +277,7 @@ public class JavaScriptSensorTest {
 
   @Test
   public void should_run_custom_rule() throws Exception {
-    inputFile("file.js");
+    inputFile("file4.js");
     ActiveRules activeRules = (new ActiveRulesBuilder())
       .create(RuleKey.of("customKey", "key"))
       .activate()
@@ -298,7 +298,7 @@ public class JavaScriptSensorTest {
 
   @Test
   public void should_run_custom_rule_repository() throws Exception {
-    inputFile("file.js");
+    inputFile("file5.js");
     ActiveRules activeRules = (new ActiveRulesBuilder())
       .create(RuleKey.of("custom-repo", "key2"))
       .activate()

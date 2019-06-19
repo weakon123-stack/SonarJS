@@ -344,8 +344,8 @@ public class EslintBasedRulesSensorTest {
     return new CheckFactory(builder.build());
   }
 
-  private static DefaultInputFile createInputFile(SensorContextTester context) {
-    DefaultInputFile inputFile = new TestInputFileBuilder("moduleKey", "dir/file.js")
+  private DefaultInputFile createInputFile(SensorContextTester context) {
+    DefaultInputFile inputFile = new TestInputFileBuilder("moduleKey", "dir/file" + Math.random() + ".js")
       .setLanguage("js")
       .setContents("if (cond)\ndoFoo(); \nelse \ndoFoo();")
       .build();

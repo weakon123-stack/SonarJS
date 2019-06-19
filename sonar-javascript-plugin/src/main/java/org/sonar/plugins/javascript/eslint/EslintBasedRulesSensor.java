@@ -22,6 +22,11 @@ package org.sonar.plugins.javascript.eslint;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
+import com.google.gson.reflect.TypeToken;
+import com.google.gson.stream.JsonReader;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -95,6 +100,22 @@ public class EslintBasedRulesSensor implements Sensor {
       return;
     }
     try {
+
+      // Load analysis state
+      Gson gson = new Gson();
+      try {
+        java.lang.reflect.Type type = new TypeToken<HashMap<String, FileAnalysis>>() {
+        }.getType();
+        JsonReader reader = new JsonReader(new FileReader("analysisStateESLintSensor.json"));
+        HashMap<String, FileAnalysis> loadedAnalysisState = gson.fromJson(reader, type);
+        if (loadedAnalysisState != null) {
+          this.analysisState = loadedAnalysisState;
+        }
+      } catch (FileNotFoundException e) {
+        LOG.debug("Cannot load analysisState file");
+      }
+
+
       eslintBridgeServer.startServerLazily(context);
       Iterable<InputFile> inputFiles = getInputFiles(context);
       startProgressReport(inputFiles);
@@ -108,6 +129,7 @@ public class EslintBasedRulesSensor implements Sensor {
         progressReport.nextFile();
       }
       progressReport.stop();
+      storeAnalysisState(gson);
     } catch (ServerAlreadyFailedException e) {
       LOG.debug("Skipping start of eslint-bridge server due to the failure during first analysis");
       LOG.debug("Skipping execution of eslint-based rules due to the problems with eslint-bridge server");
@@ -121,6 +143,17 @@ public class EslintBasedRulesSensor implements Sensor {
       LOG.error("Failure during analysis, " + eslintBridgeServer.getCommandInfo(), e);
     } finally {
       progressReport.cancel();
+    }
+  }
+
+  private void storeAnalysisState(Gson gson) {
+    try {
+      FileWriter writer = new FileWriter("analysisStateESLintSensor.json");
+      gson.toJson(this.analysisState, writer);
+      writer.flush();
+      writer.close();
+    } catch (IOException e) {
+      LOG.debug("Cannot store analysisState file");
     }
   }
 
@@ -189,8 +222,8 @@ public class EslintBasedRulesSensor implements Sensor {
     Optional<RuleKey> ruleKeyOptional = ruleKey(issue.ruleId);
     ruleKeyOptional.ifPresent(ruleKey ->
       newIssue.at(location)
-      .forRule(ruleKey)
-      .save());
+        .forRule(ruleKey)
+        .save());
   }
 
   private static NewIssueLocation newSecondaryLocation(InputFile inputFile, NewIssue issue, IssueLocation location) {

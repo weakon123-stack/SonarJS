@@ -25,6 +25,14 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.gson.Gson;
+import com.google.gson.JsonDeserializationContext;
+import com.google.gson.JsonDeserializer;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonSerializationContext;
+import com.google.gson.JsonSerializer;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.sonar.sslr.api.RecognitionException;
@@ -244,6 +252,7 @@ public class JavaScriptSensor implements Sensor {
   private void scanFile(SensorContext sensorContext, InputFile inputFile, ProductDependentExecutor executor, List<TreeVisitor> visitors, ScriptTree scriptTree) {
     JavaScriptVisitorContext context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
     List<Issue> fileIssues = new ArrayList<>();
+    List<SerializableIssue> serializableIssues = new ArrayList<>();
     BigInteger encodedFileContent = null;
     try {
       MessageDigest fileContentDigest = MessageDigest.getInstance("SHA-256");
@@ -253,7 +262,12 @@ public class JavaScriptSensor implements Sensor {
     }
     FileAnalysis fileAnalysis = analysisState.get(inputFile.uri().getPath());
     if (fileAnalysis != null && fileAnalysis.encodedFileContent.equals(encodedFileContent)) {
-      fileIssues = fileAnalysis.issues;
+      serializableIssues = fileAnalysis.issues;
+      for (TreeVisitor visitor : visitors) {
+        if (!(visitor instanceof JavaScriptCheck)) {
+          visitor.scanTree(context);
+        }
+      }
     } else {
       for (TreeVisitor visitor : visitors) {
         if (visitor instanceof JavaScriptCheck) {
@@ -262,12 +276,42 @@ public class JavaScriptSensor implements Sensor {
           visitor.scanTree(context);
         }
       }
+      serializableIssues = fileIssues.stream()
+        .map(issue -> {
+          RuleKey ruleKey = ruleKey(issue.check());
+          SerializableIssue serializableIssue = new SerializableIssue();
+          serializableIssue.ruleKey = ruleKey;
+          serializableIssue.cost = issue.cost();
+          if (issue instanceof FileIssue) {
+            serializableIssue.message = ((FileIssue) issue).message();
+          } else if (issue instanceof LineIssue) {
+            serializableIssue.message = ((LineIssue) issue).message();
+            serializableIssue.line = ((LineIssue) issue).line();
+          } else {
+            PreciseIssue preciseIssue = (PreciseIssue) issue;
+            serializableIssue.message = preciseIssue.primaryLocation().message();
+            serializableIssue.line = preciseIssue.primaryLocation().startLine();
+            serializableIssue.column = preciseIssue.primaryLocation().startLineOffset();
+            serializableIssue.endLine = preciseIssue.primaryLocation().endLine();
+            serializableIssue.endColumn = preciseIssue.primaryLocation().endLineOffset();
+            serializableIssue.secondaryLocations = preciseIssue.secondaryLocations().stream().map(secondary -> {
+              SecondaryIssueLocation secondaryIssueLocation = new SecondaryIssueLocation();
+              secondaryIssueLocation.line = secondary.startLine();
+              secondaryIssueLocation.column = secondary.startLineOffset();
+              secondaryIssueLocation.endLine = secondary.endLine();
+              secondaryIssueLocation.endColumn = secondary.endLineOffset();
+              secondaryIssueLocation.message = secondary.message();
+              return secondaryIssueLocation;
+            }).collect(Collectors.toList());
+          }
+          return serializableIssue;
+        }).collect(Collectors.toList());
+
       if (encodedFileContent != null) {
-        analysisState.put(inputFile.uri().getPath(), new FileAnalysis(encodedFileContent, fileIssues));
+        analysisState.put(inputFile.uri().getPath(), new FileAnalysis(encodedFileContent, serializableIssues));
       }
     }
-
-    saveFileIssues(sensorContext, fileIssues, inputFile);
+    saveIssue(sensorContext, serializableIssues, inputFile);
     executor.highlightSymbols(inputFile, context);
   }
 
@@ -282,6 +326,50 @@ public class JavaScriptSensor implements Sensor {
         savePreciseIssue(sensorContext, inputFile, ruleKey, (PreciseIssue) issue);
       }
     }
+  }
+
+  private void saveIssue(SensorContext context, List<SerializableIssue> issues, InputFile file) {
+
+    issues.forEach(issue -> {
+      NewIssue newIssue = context.newIssue();
+      NewIssueLocation location = newIssue.newLocation()
+        .message(issue.message)
+        .on(file);
+
+      if (issue.endLine != null) {
+        location.at(file.newRange(issue.line, issue.column, issue.endLine, issue.endColumn));
+      } else if (issue.line != null)  {
+        location.at(file.selectLine(issue.line));
+      }
+
+      issue.secondaryLocations.forEach(secondary -> {
+        NewIssueLocation newIssueLocation = newSecondaryLocation(file, newIssue, secondary);
+        if (newIssueLocation != null) {
+          newIssue.addLocation(newIssueLocation);
+        }
+      });
+
+
+      if (issue.cost != null) {
+        newIssue.gap(issue.cost);
+      }
+      newIssue.at(location)
+        .forRule(issue.ruleKey)
+        .save();
+    });
+  }
+
+  private static NewIssueLocation newSecondaryLocation(InputFile inputFile, NewIssue issue, SecondaryIssueLocation location) {
+    NewIssueLocation newIssueLocation = issue.newLocation().on(inputFile);
+
+    if (location.line != null && location.endLine != null && location.column != null && location.endColumn != null) {
+      newIssueLocation.at(inputFile.newRange(location.line, location.column, location.endLine, location.endColumn));
+      if (location.message != null) {
+        newIssueLocation.message(location.message);
+      }
+      return newIssueLocation;
+    }
+    return null;
   }
 
   private static void savePreciseIssue(SensorContext sensorContext, InputFile inputFile, RuleKey ruleKey, PreciseIssue issue) {
@@ -363,18 +451,28 @@ public class JavaScriptSensor implements Sensor {
     // Load analysis state
     Gson gson = new Gson();
     try {
-      java.lang.reflect.Type type = new TypeToken<HashMap<String, FileAnalysis>>() {}.getType();
+      java.lang.reflect.Type type = new TypeToken<HashMap<String, FileAnalysis>>() {
+      }.getType();
       JsonReader reader = new JsonReader(new FileReader("analysisStateJavaScriptSensor.json"));
-      this.analysisState = gson.fromJson(reader, type);
+      HashMap<String, FileAnalysis> loadedAnalysisState = gson.fromJson(reader, type);
+      if (loadedAnalysisState != null) {
+        this.analysisState = loadedAnalysisState;
+      }
     } catch (FileNotFoundException e) {
       LOG.debug("Cannot load analysisState file");
     }
 
     analyseFiles(context, treeVisitors, inputFiles, executor, progressReport);
+    storeAnalysisState(gson);
 
-    // Store analysis state
+  }
+
+  private void storeAnalysisState(Gson gson) {
     try {
-      gson.toJson(this.analysisState, new FileWriter("analysisStateJavaScriptSensor.json"));
+      FileWriter writer = new FileWriter("analysisStateJavaScriptSensor.json");
+      gson.toJson(this.analysisState, writer);
+      writer.flush();
+      writer.close();
     } catch (IOException e) {
       LOG.debug("Cannot store analysisState file");
     }
@@ -507,12 +605,71 @@ public class JavaScriptSensor implements Sensor {
 
   static class FileAnalysis {
     BigInteger encodedFileContent;
-    List<Issue> issues;
+    List<SerializableIssue> issues;
 
-    FileAnalysis(BigInteger encodedFileContent, List<Issue> issues) {
+    FileAnalysis(BigInteger encodedFileContent, List<SerializableIssue> issues) {
       this.encodedFileContent = encodedFileContent;
       this.issues = issues;
     }
+  }
+
+  class IssueInterfaceAdapter implements JsonSerializer<Issue>, JsonDeserializer<Issue> {
+
+    private static final String CLASSNAME = "CLASSNAME";
+    private static final String DATA = "DATA";
+
+    @Override
+    public Issue deserialize(JsonElement jsonElement, java.lang.reflect.Type type, JsonDeserializationContext jsonDeserializationContext) throws JsonParseException {
+      JsonObject jsonObject = jsonElement.getAsJsonObject();
+      JsonPrimitive prim = (JsonPrimitive) jsonObject.get(CLASSNAME);
+      String className = prim.getAsString();
+      Class klass = getObjectClass(className);
+      return jsonDeserializationContext.deserialize(jsonObject.get(DATA), klass);
+    }
+
+    private Class getObjectClass(String className) {
+      try {
+        return Class.forName(className);
+      } catch (ClassNotFoundException e) {
+        throw new JsonParseException(e.getMessage());
+      }
+    }
+
+    @Override
+    public JsonElement serialize(Issue issue, java.lang.reflect.Type type, JsonSerializationContext jsonSerializationContext) {
+      JsonObject jsonObject = new JsonObject();
+      jsonObject.addProperty(CLASSNAME, issue.getClass().getName());
+      if (issue instanceof FileIssue) {
+        jsonObject.add(DATA, jsonSerializationContext.serialize(new FileIssue(issue.check(), ((FileIssue) issue).message())));
+      } else if (issue instanceof LineIssue) {
+        LineIssue lineIssue = new LineIssue(issue.check(), ((LineIssue) issue).line(), ((LineIssue) issue).message());
+        jsonObject.add(DATA, jsonSerializationContext.serialize(lineIssue));
+      } else {
+        PreciseIssue preciseIssue = new PreciseIssue(issue.check(), ((PreciseIssue) issue).primaryLocation());
+        jsonObject.add(DATA, jsonSerializationContext.serialize(preciseIssue));
+      }
+      return jsonObject;
+    }
+  }
+
+
+  static class SerializableIssue {
+    Integer line;
+    Integer column;
+    Integer endLine;
+    Integer endColumn;
+    String message;
+    RuleKey ruleKey;
+    List<SecondaryIssueLocation> secondaryLocations = new ArrayList<>();
+    Double cost;
+  }
+
+  static class SecondaryIssueLocation {
+    Integer line;
+    Integer column;
+    Integer endLine;
+    Integer endColumn;
+    String message;
   }
 
 }
