@@ -23,7 +23,12 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import java.io.IOException;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -59,6 +64,7 @@ public class EslintBasedRulesSensor implements Sensor {
   private final AnalysisWarningsWrapper analysisWarnings;
   @VisibleForTesting
   final Rule[] rules;
+  private HashMap<String, FileAnalysis> analysisState = new HashMap<>();
 
   private ProgressReport progressReport =
     new ProgressReport("Report about progress of ESLint-based rules", TimeUnit.SECONDS.toMillis(10));
@@ -119,12 +125,29 @@ public class EslintBasedRulesSensor implements Sensor {
   }
 
   private void analyze(InputFile file, SensorContext context) {
+    BigInteger encodedFileContent = null;
+    try {
+      MessageDigest fileContentDigest = MessageDigest.getInstance("SHA-256");
+      encodedFileContent = new BigInteger(1, fileContentDigest.digest(file.contents().getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException | IOException e) {
+      LOG.debug("Couldn't create hash for file " + file.filename(), e);
+    }
+    FileAnalysis fileAnalysis = analysisState.get(file.uri().getPath());
+    if (fileAnalysis != null && fileAnalysis.encodedFileContent.equals(encodedFileContent)) {
+      for (AnalysisResponseIssue issue : fileAnalysis.issues) {
+        saveIssue(file, context, issue);
+      }
+      return;
+    }
     AnalysisRequest analysisRequest = new AnalysisRequest(file, rules);
     try {
       String result = eslintBridgeServer.call(GSON.toJson(analysisRequest));
       AnalysisResponseIssue[] issues = toIssues(result);
       for (AnalysisResponseIssue issue : issues) {
         saveIssue(file, context, issue);
+      }
+      if (encodedFileContent != null) {
+        analysisState.put(file.uri().getPath(), new FileAnalysis(encodedFileContent, issues));
       }
     } catch (IOException e) {
       LOG.error("Failed to get response while analyzing " + file.uri(), e);
@@ -268,6 +291,16 @@ public class EslintBasedRulesSensor implements Sensor {
     Integer endLine;
     Integer endColumn;
     String message;
+  }
+
+  static class FileAnalysis {
+    BigInteger encodedFileContent;
+    AnalysisResponseIssue[] issues;
+
+    FileAnalysis(BigInteger encodedFileContent, AnalysisResponseIssue[] issues) {
+      this.encodedFileContent = encodedFileContent;
+      this.issues = issues;
+    }
   }
 
 }

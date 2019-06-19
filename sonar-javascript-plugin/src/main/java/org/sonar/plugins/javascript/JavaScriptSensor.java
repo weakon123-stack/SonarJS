@@ -24,12 +24,24 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+import com.google.gson.stream.JsonReader;
 import com.sonar.sslr.api.RecognitionException;
 import com.sonar.sslr.api.typed.ActionParser;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -94,6 +106,7 @@ public class JavaScriptSensor implements Sensor {
   private final ActionParser<Tree> vueParser;
   // parsingErrorRuleKey equals null if ParsingErrorCheck is not activated
   private RuleKey parsingErrorRuleKey = null;
+  private HashMap<String, FileAnalysis> analysisState = new HashMap<>();
 
   public JavaScriptSensor(
     CheckFactory checkFactory, FileLinesContextFactory fileLinesContextFactory, FileSystem fileSystem, NoSonarFilter noSonarFilter) {
@@ -101,8 +114,8 @@ public class JavaScriptSensor implements Sensor {
   }
 
   /**
-   *  This constructor is necessary for Pico container to correctly instantiate sensor with custom rules loaded via {@link CustomJavaScriptRulesDefinition}
-   *  See plugin integration tests
+   * This constructor is necessary for Pico container to correctly instantiate sensor with custom rules loaded via {@link CustomJavaScriptRulesDefinition}
+   * See plugin integration tests
    */
   public JavaScriptSensor(
     CheckFactory checkFactory, FileLinesContextFactory fileLinesContextFactory, FileSystem fileSystem, NoSonarFilter noSonarFilter,
@@ -111,8 +124,8 @@ public class JavaScriptSensor implements Sensor {
   }
 
   /**
-   *  This constructor is necessary for Pico container to correctly instantiate sensor with custom rules loaded via {@link CustomRuleRepository}
-   *  See plugin integration tests
+   * This constructor is necessary for Pico container to correctly instantiate sensor with custom rules loaded via {@link CustomRuleRepository}
+   * See plugin integration tests
    */
   public JavaScriptSensor(
     CheckFactory checkFactory, FileLinesContextFactory fileLinesContextFactory, FileSystem fileSystem, NoSonarFilter noSonarFilter,
@@ -230,14 +243,27 @@ public class JavaScriptSensor implements Sensor {
 
   private void scanFile(SensorContext sensorContext, InputFile inputFile, ProductDependentExecutor executor, List<TreeVisitor> visitors, ScriptTree scriptTree) {
     JavaScriptVisitorContext context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
-
     List<Issue> fileIssues = new ArrayList<>();
-
-    for (TreeVisitor visitor : visitors) {
-      if (visitor instanceof JavaScriptCheck) {
-        fileIssues.addAll(((JavaScriptCheck) visitor).scanFile(context));
-      } else {
-        visitor.scanTree(context);
+    BigInteger encodedFileContent = null;
+    try {
+      MessageDigest fileContentDigest = MessageDigest.getInstance("SHA-256");
+      encodedFileContent = new BigInteger(1, fileContentDigest.digest(inputFile.contents().getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException | IOException e) {
+      LOG.debug("Couldn't create hash for file " + inputFile.filename(), e);
+    }
+    FileAnalysis fileAnalysis = analysisState.get(inputFile.uri().getPath());
+    if (fileAnalysis != null && fileAnalysis.encodedFileContent.equals(encodedFileContent)) {
+      fileIssues = fileAnalysis.issues;
+    } else {
+      for (TreeVisitor visitor : visitors) {
+        if (visitor instanceof JavaScriptCheck) {
+          fileIssues.addAll(((JavaScriptCheck) visitor).scanFile(context));
+        } else {
+          visitor.scanTree(context);
+        }
+      }
+      if (encodedFileContent != null) {
+        analysisState.put(inputFile.uri().getPath(), new FileAnalysis(encodedFileContent, fileIssues));
       }
     }
 
@@ -334,8 +360,24 @@ public class JavaScriptSensor implements Sensor {
 
     ProgressReport progressReport = new ProgressReport("Report about progress of Javascript analyzer", TimeUnit.SECONDS.toMillis(10));
     progressReport.start(files);
+    // Load analysis state
+    Gson gson = new Gson();
+    try {
+      java.lang.reflect.Type type = new TypeToken<HashMap<String, FileAnalysis>>() {}.getType();
+      JsonReader reader = new JsonReader(new FileReader("analysisStateJavaScriptSensor.json"));
+      this.analysisState = gson.fromJson(reader, type);
+    } catch (FileNotFoundException e) {
+      LOG.debug("Cannot load analysisState file");
+    }
 
     analyseFiles(context, treeVisitors, inputFiles, executor, progressReport);
+
+    // Store analysis state
+    try {
+      gson.toJson(this.analysisState, new FileWriter("analysisStateJavaScriptSensor.json"));
+    } catch (IOException e) {
+      LOG.debug("Cannot store analysisState file");
+    }
   }
 
   /**
@@ -460,6 +502,16 @@ public class JavaScriptSensor implements Sensor {
   static class AnalysisException extends RuntimeException {
     AnalysisException(String message, Throwable cause) {
       super(message, cause);
+    }
+  }
+
+  static class FileAnalysis {
+    BigInteger encodedFileContent;
+    List<Issue> issues;
+
+    FileAnalysis(BigInteger encodedFileContent, List<Issue> issues) {
+      this.encodedFileContent = encodedFileContent;
+      this.issues = issues;
     }
   }
 
