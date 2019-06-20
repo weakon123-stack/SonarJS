@@ -25,14 +25,6 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.gson.Gson;
-import com.google.gson.JsonDeserializationContext;
-import com.google.gson.JsonDeserializer;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
-import com.google.gson.JsonPrimitive;
-import com.google.gson.JsonSerializationContext;
-import com.google.gson.JsonSerializer;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.sonar.sslr.api.RecognitionException;
@@ -54,6 +46,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
+import javax.annotation.CheckForNull;
 import javax.annotation.Nullable;
 import org.apache.commons.lang.ArrayUtils;
 import org.sonar.api.SonarProduct;
@@ -61,7 +54,6 @@ import org.sonar.api.batch.fs.FilePredicate;
 import org.sonar.api.batch.fs.FileSystem;
 import org.sonar.api.batch.fs.InputFile;
 import org.sonar.api.batch.fs.InputFile.Type;
-import org.sonar.api.batch.fs.TextRange;
 import org.sonar.api.batch.rule.CheckFactory;
 import org.sonar.api.batch.sensor.Sensor;
 import org.sonar.api.batch.sensor.SensorContext;
@@ -91,7 +83,6 @@ import org.sonar.plugins.javascript.api.tree.ScriptTree;
 import org.sonar.plugins.javascript.api.tree.Tree;
 import org.sonar.plugins.javascript.api.visitors.FileIssue;
 import org.sonar.plugins.javascript.api.visitors.Issue;
-import org.sonar.plugins.javascript.api.visitors.IssueLocation;
 import org.sonar.plugins.javascript.api.visitors.LineIssue;
 import org.sonar.plugins.javascript.api.visitors.PreciseIssue;
 import org.sonar.plugins.javascript.api.visitors.TreeVisitor;
@@ -115,6 +106,9 @@ public class JavaScriptSensor implements Sensor {
   // parsingErrorRuleKey equals null if ParsingErrorCheck is not activated
   private RuleKey parsingErrorRuleKey = null;
   private HashMap<String, FileAnalysis> analysisState = new HashMap<>();
+  private long parsingTime = 0;
+  private long visitorTime = 0;
+  private long highlightingTime = 0;
 
   public JavaScriptSensor(
     CheckFactory checkFactory, FileLinesContextFactory fileLinesContextFactory, FileSystem fileSystem, NoSonarFilter noSonarFilter) {
@@ -194,12 +188,40 @@ public class JavaScriptSensor implements Sensor {
     if (inputFile.filename().endsWith(".vue")) {
       currentParser = this.vueParser;
     }
+    BigInteger encodedFileContent = null;
+    try {
+      MessageDigest fileContentDigest = MessageDigest.getInstance("SHA-256");
+      encodedFileContent = new BigInteger(1, fileContentDigest.digest(inputFile.contents().getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException | IOException e) {
+      LOG.debug("Couldn't create hash for file " + inputFile.filename(), e);
+    }
 
     ScriptTree scriptTree;
 
     try {
+      long startTimeParsing = System.nanoTime();
       scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
-      scanFile(sensorContext, inputFile, executor, visitors, scriptTree);
+      JavaScriptVisitorContext context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
+      long endTimeParsing = System.nanoTime();
+      parsingTime += (endTimeParsing - startTimeParsing);
+      FileAnalysis fileAnalysis = analysisState.get(inputFile.uri().getPath());
+      if (fileAnalysis != null && fileAnalysis.encodedFileContent.equals(encodedFileContent)) {
+        long startTimeVisitors = System.nanoTime();
+        for (TreeVisitor visitor : visitors) {
+          if (!(visitor instanceof JavaScriptCheck)) {
+            visitor.scanTree(context);
+          }
+        }
+        long endTimeVisitors = System.nanoTime();
+        visitorTime += (endTimeVisitors - startTimeVisitors);
+        saveIssue(sensorContext, fileAnalysis.issues, inputFile);
+        long startTimeHighlighting = System.nanoTime();
+        executor.highlightSymbols(inputFile, context);
+        long endTimeHighlighting = System.nanoTime();
+        highlightingTime += (endTimeHighlighting - startTimeHighlighting);
+        return;
+      }
+      scanFile(sensorContext, inputFile, executor, visitors, scriptTree, encodedFileContent);
     } catch (RecognitionException e) {
       checkInterrupted(e);
       LOG.error("Unable to parse file: " + inputFile.uri());
@@ -249,83 +271,57 @@ public class JavaScriptSensor implements Sensor {
       .save();
   }
 
-  private void scanFile(SensorContext sensorContext, InputFile inputFile, ProductDependentExecutor executor, List<TreeVisitor> visitors, ScriptTree scriptTree) {
+  private void scanFile(SensorContext sensorContext, InputFile inputFile, ProductDependentExecutor executor, List<TreeVisitor> visitors, ScriptTree scriptTree, @CheckForNull BigInteger encodedFileContent) {
     JavaScriptVisitorContext context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
     List<Issue> fileIssues = new ArrayList<>();
-    List<SerializableIssue> serializableIssues = new ArrayList<>();
-    BigInteger encodedFileContent = null;
-    try {
-      MessageDigest fileContentDigest = MessageDigest.getInstance("SHA-256");
-      encodedFileContent = new BigInteger(1, fileContentDigest.digest(inputFile.contents().getBytes(StandardCharsets.UTF_8)));
-    } catch (NoSuchAlgorithmException | IOException e) {
-      LOG.debug("Couldn't create hash for file " + inputFile.filename(), e);
+    for (TreeVisitor visitor : visitors) {
+      if (visitor instanceof JavaScriptCheck) {
+        fileIssues.addAll(((JavaScriptCheck) visitor).scanFile(context));
+      } else {
+        visitor.scanTree(context);
+      }
     }
-    FileAnalysis fileAnalysis = analysisState.get(inputFile.uri().getPath());
-    if (fileAnalysis != null && fileAnalysis.encodedFileContent.equals(encodedFileContent)) {
-      serializableIssues = fileAnalysis.issues;
-      for (TreeVisitor visitor : visitors) {
-        if (!(visitor instanceof JavaScriptCheck)) {
-          visitor.scanTree(context);
-        }
-      }
-    } else {
-      for (TreeVisitor visitor : visitors) {
-        if (visitor instanceof JavaScriptCheck) {
-          fileIssues.addAll(((JavaScriptCheck) visitor).scanFile(context));
-        } else {
-          visitor.scanTree(context);
-        }
-      }
-      serializableIssues = fileIssues.stream()
-        .map(issue -> {
-          RuleKey ruleKey = ruleKey(issue.check());
-          SerializableIssue serializableIssue = new SerializableIssue();
-          serializableIssue.ruleKey = ruleKey;
-          serializableIssue.cost = issue.cost();
-          if (issue instanceof FileIssue) {
-            serializableIssue.message = ((FileIssue) issue).message();
-          } else if (issue instanceof LineIssue) {
-            serializableIssue.message = ((LineIssue) issue).message();
-            serializableIssue.line = ((LineIssue) issue).line();
-          } else {
-            PreciseIssue preciseIssue = (PreciseIssue) issue;
-            serializableIssue.message = preciseIssue.primaryLocation().message();
-            serializableIssue.line = preciseIssue.primaryLocation().startLine();
-            serializableIssue.column = preciseIssue.primaryLocation().startLineOffset();
-            serializableIssue.endLine = preciseIssue.primaryLocation().endLine();
-            serializableIssue.endColumn = preciseIssue.primaryLocation().endLineOffset();
-            serializableIssue.secondaryLocations = preciseIssue.secondaryLocations().stream().map(secondary -> {
-              SecondaryIssueLocation secondaryIssueLocation = new SecondaryIssueLocation();
-              secondaryIssueLocation.line = secondary.startLine();
-              secondaryIssueLocation.column = secondary.startLineOffset();
-              secondaryIssueLocation.endLine = secondary.endLine();
-              secondaryIssueLocation.endColumn = secondary.endLineOffset();
-              secondaryIssueLocation.message = secondary.message();
-              return secondaryIssueLocation;
-            }).collect(Collectors.toList());
-          }
-          return serializableIssue;
-        }).collect(Collectors.toList());
-
-      if (encodedFileContent != null) {
-        analysisState.put(inputFile.uri().getPath(), new FileAnalysis(encodedFileContent, serializableIssues));
-      }
+    List<SerializableIssue> serializableIssues = getSerializableIssues(fileIssues);
+    if (encodedFileContent != null) {
+      analysisState.put(inputFile.uri().getPath(), new FileAnalysis(encodedFileContent, serializableIssues));
     }
     saveIssue(sensorContext, serializableIssues, inputFile);
     executor.highlightSymbols(inputFile, context);
   }
 
-  private void saveFileIssues(SensorContext sensorContext, List<Issue> fileIssues, InputFile inputFile) {
-    for (Issue issue : fileIssues) {
-      RuleKey ruleKey = ruleKey(issue.check());
-      if (issue instanceof FileIssue) {
-        saveFileIssue(sensorContext, inputFile, ruleKey, (FileIssue) issue);
-      } else if (issue instanceof LineIssue) {
-        saveLineIssue(sensorContext, inputFile, ruleKey, (LineIssue) issue);
-      } else {
-        savePreciseIssue(sensorContext, inputFile, ruleKey, (PreciseIssue) issue);
-      }
-    }
+  private List<SerializableIssue> getSerializableIssues(List<Issue> fileIssues) {
+    List<SerializableIssue> serializableIssues;
+    serializableIssues = fileIssues.stream()
+      .map(issue -> {
+        RuleKey ruleKey = ruleKey(issue.check());
+        SerializableIssue serializableIssue = new SerializableIssue();
+        serializableIssue.ruleKey = ruleKey;
+        serializableIssue.cost = issue.cost();
+        if (issue instanceof FileIssue) {
+          serializableIssue.message = ((FileIssue) issue).message();
+        } else if (issue instanceof LineIssue) {
+          serializableIssue.message = ((LineIssue) issue).message();
+          serializableIssue.line = ((LineIssue) issue).line();
+        } else {
+          PreciseIssue preciseIssue = (PreciseIssue) issue;
+          serializableIssue.message = preciseIssue.primaryLocation().message();
+          serializableIssue.line = preciseIssue.primaryLocation().startLine();
+          serializableIssue.column = preciseIssue.primaryLocation().startLineOffset();
+          serializableIssue.endLine = preciseIssue.primaryLocation().endLine();
+          serializableIssue.endColumn = preciseIssue.primaryLocation().endLineOffset();
+          serializableIssue.secondaryLocations = preciseIssue.secondaryLocations().stream().map(secondary -> {
+            SecondaryIssueLocation secondaryIssueLocation = new SecondaryIssueLocation();
+            secondaryIssueLocation.line = secondary.startLine();
+            secondaryIssueLocation.column = secondary.startLineOffset();
+            secondaryIssueLocation.endLine = secondary.endLine();
+            secondaryIssueLocation.endColumn = secondary.endLineOffset();
+            secondaryIssueLocation.message = secondary.message();
+            return secondaryIssueLocation;
+          }).collect(Collectors.toList());
+        }
+        return serializableIssue;
+      }).collect(Collectors.toList());
+    return serializableIssues;
   }
 
   private void saveIssue(SensorContext context, List<SerializableIssue> issues, InputFile file) {
@@ -338,7 +334,7 @@ public class JavaScriptSensor implements Sensor {
 
       if (issue.endLine != null) {
         location.at(file.newRange(issue.line, issue.column, issue.endLine, issue.endColumn));
-      } else if (issue.line != null)  {
+      } else if (issue.line != null) {
         location.at(file.selectLine(issue.line));
       }
 
@@ -370,37 +366,6 @@ public class JavaScriptSensor implements Sensor {
       return newIssueLocation;
     }
     return null;
-  }
-
-  private static void savePreciseIssue(SensorContext sensorContext, InputFile inputFile, RuleKey ruleKey, PreciseIssue issue) {
-    NewIssue newIssue = sensorContext.newIssue();
-
-    newIssue
-      .forRule(ruleKey)
-      .at(newLocation(inputFile, newIssue, issue.primaryLocation()));
-
-    if (issue.cost() != null) {
-      newIssue.gap(issue.cost());
-    }
-
-    for (IssueLocation secondary : issue.secondaryLocations()) {
-      newIssue.addLocation(newLocation(inputFile, newIssue, secondary));
-    }
-    newIssue.save();
-  }
-
-  private static NewIssueLocation newLocation(InputFile inputFile, NewIssue issue, IssueLocation location) {
-    TextRange range = inputFile.newRange(
-      location.startLine(), location.startLineOffset(), location.endLine(), location.endLineOffset());
-
-    NewIssueLocation newLocation = issue.newLocation()
-      .on(inputFile)
-      .at(range);
-
-    if (location.message() != null) {
-      newLocation.message(location.message());
-    }
-    return newLocation;
   }
 
   private RuleKey ruleKey(JavaScriptCheck check) {
@@ -464,7 +429,9 @@ public class JavaScriptSensor implements Sensor {
 
     analyseFiles(context, treeVisitors, inputFiles, executor, progressReport);
     storeAnalysisState(gson);
-
+    LOG.info("Parsing time = " + parsingTime  / 1000000 + " ms");
+    LOG.info("Visitors time = " + visitorTime  / 1000000 + " ms");
+    LOG.info("Highlighting time = " + highlightingTime  / 1000000 + " ms");
   }
 
   private void storeAnalysisState(Gson gson) {
@@ -564,39 +531,6 @@ public class JavaScriptSensor implements Sensor {
     return context.runtime().getProduct() == SonarProduct.SONARLINT;
   }
 
-  private static void saveLineIssue(SensorContext sensorContext, InputFile inputFile, RuleKey ruleKey, LineIssue issue) {
-    NewIssue newIssue = sensorContext.newIssue();
-
-    NewIssueLocation primaryLocation = newIssue.newLocation()
-      .message(issue.message())
-      .on(inputFile)
-      .at(inputFile.selectLine(issue.line()));
-
-    saveIssue(newIssue, primaryLocation, ruleKey, issue);
-  }
-
-  private static void saveFileIssue(SensorContext sensorContext, InputFile inputFile, RuleKey ruleKey, FileIssue issue) {
-    NewIssue newIssue = sensorContext.newIssue();
-
-    NewIssueLocation primaryLocation = newIssue.newLocation()
-      .message(issue.message())
-      .on(inputFile);
-
-    saveIssue(newIssue, primaryLocation, ruleKey, issue);
-  }
-
-  private static void saveIssue(NewIssue newIssue, NewIssueLocation primaryLocation, RuleKey ruleKey, Issue issue) {
-    newIssue
-      .forRule(ruleKey)
-      .at(primaryLocation);
-
-    if (issue.cost() != null) {
-      newIssue.gap(issue.cost());
-    }
-
-    newIssue.save();
-  }
-
   static class AnalysisException extends RuntimeException {
     AnalysisException(String message, Throwable cause) {
       super(message, cause);
@@ -612,46 +546,6 @@ public class JavaScriptSensor implements Sensor {
       this.issues = issues;
     }
   }
-
-  class IssueInterfaceAdapter implements JsonSerializer<Issue>, JsonDeserializer<Issue> {
-
-    private static final String CLASSNAME = "CLASSNAME";
-    private static final String DATA = "DATA";
-
-    @Override
-    public Issue deserialize(JsonElement jsonElement, java.lang.reflect.Type type, JsonDeserializationContext jsonDeserializationContext) throws JsonParseException {
-      JsonObject jsonObject = jsonElement.getAsJsonObject();
-      JsonPrimitive prim = (JsonPrimitive) jsonObject.get(CLASSNAME);
-      String className = prim.getAsString();
-      Class klass = getObjectClass(className);
-      return jsonDeserializationContext.deserialize(jsonObject.get(DATA), klass);
-    }
-
-    private Class getObjectClass(String className) {
-      try {
-        return Class.forName(className);
-      } catch (ClassNotFoundException e) {
-        throw new JsonParseException(e.getMessage());
-      }
-    }
-
-    @Override
-    public JsonElement serialize(Issue issue, java.lang.reflect.Type type, JsonSerializationContext jsonSerializationContext) {
-      JsonObject jsonObject = new JsonObject();
-      jsonObject.addProperty(CLASSNAME, issue.getClass().getName());
-      if (issue instanceof FileIssue) {
-        jsonObject.add(DATA, jsonSerializationContext.serialize(new FileIssue(issue.check(), ((FileIssue) issue).message())));
-      } else if (issue instanceof LineIssue) {
-        LineIssue lineIssue = new LineIssue(issue.check(), ((LineIssue) issue).line(), ((LineIssue) issue).message());
-        jsonObject.add(DATA, jsonSerializationContext.serialize(lineIssue));
-      } else {
-        PreciseIssue preciseIssue = new PreciseIssue(issue.check(), ((PreciseIssue) issue).primaryLocation());
-        jsonObject.add(DATA, jsonSerializationContext.serialize(preciseIssue));
-      }
-      return jsonObject;
-    }
-  }
-
 
   static class SerializableIssue {
     Integer line;

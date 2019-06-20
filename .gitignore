@@ -30,3 +30,6 @@ Desktop.ini
 # ---- Sonar
 .sonar
 .scannerwork
+
+sonar-javascript-plugin/analysisStateESLintSensor.json
+sonar-javascript-plugin/analysisStateJavaScriptSensor.json
