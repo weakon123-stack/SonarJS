@@ -51,12 +51,17 @@ public class MetricsVisitor extends SubscriptionVisitor {
   private final Boolean ignoreHeaderComments;
   private FileLinesContextFactory fileLinesContextFactory;
   private Map<InputFile, Set<Integer>> projectExecutableLines;
+  private Map<Metric, Serializable> metrics = new HashMap<>();
 
   public MetricsVisitor(SensorContext context, Boolean ignoreHeaderComments, FileLinesContextFactory fileLinesContextFactory) {
     this.sensorContext = context;
     this.ignoreHeaderComments = ignoreHeaderComments;
     this.fileLinesContextFactory = fileLinesContextFactory;
     this.projectExecutableLines = new HashMap<>();
+  }
+
+  public Map<Metric, Serializable> getMetrics() {
+    return metrics;
   }
 
   /**
@@ -125,6 +130,7 @@ public class MetricsVisitor extends SubscriptionVisitor {
   }
 
   private <T extends Serializable> void saveMetric(Metric metric, T value) {
+    this.metrics.put(metric, value);
     sensorContext.<T>newMeasure()
       .withValue(value)
       .forMetric(metric)

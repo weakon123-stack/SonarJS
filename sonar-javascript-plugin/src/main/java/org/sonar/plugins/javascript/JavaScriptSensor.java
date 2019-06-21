@@ -42,7 +42,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -54,10 +56,13 @@ import org.sonar.api.batch.fs.FilePredicate;
 import org.sonar.api.batch.fs.FileSystem;
 import org.sonar.api.batch.fs.InputFile;
 import org.sonar.api.batch.fs.InputFile.Type;
+import org.sonar.api.batch.fs.TextRange;
 import org.sonar.api.batch.rule.CheckFactory;
 import org.sonar.api.batch.sensor.Sensor;
 import org.sonar.api.batch.sensor.SensorContext;
 import org.sonar.api.batch.sensor.SensorDescriptor;
+import org.sonar.api.batch.sensor.cpd.NewCpdTokens;
+import org.sonar.api.batch.sensor.highlighting.NewHighlighting;
 import org.sonar.api.batch.sensor.issue.NewIssue;
 import org.sonar.api.batch.sensor.issue.NewIssueLocation;
 import org.sonar.api.batch.sensor.symbol.NewSymbolTable;
@@ -199,6 +204,8 @@ public class JavaScriptSensor implements Sensor {
     ScriptTree scriptTree;
 
     try {
+      boolean cpdTokenAlreadySaved = false;
+      boolean highlightingTokenAlreadySaved = false;
       long startTimeParsing = System.nanoTime();
       scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
       JavaScriptVisitorContext context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
@@ -208,13 +215,43 @@ public class JavaScriptSensor implements Sensor {
       if (fileAnalysis != null && fileAnalysis.encodedFileContent.equals(encodedFileContent)) {
         long startTimeVisitors = System.nanoTime();
         for (TreeVisitor visitor : visitors) {
-          if (!(visitor instanceof JavaScriptCheck)) {
+          if (visitor instanceof CpdVisitor) {
+            if (fileAnalysis.cpdTokens == null || fileAnalysis.cpdTokens.isEmpty()) {
+              visitor.scanTree(context);
+              fileAnalysis.cpdTokens = ((CpdVisitor) visitor).getTokens();
+              cpdTokenAlreadySaved = true;
+            }
+          } else if (visitor instanceof HighlighterVisitor) {
+            if (fileAnalysis.highlightingTokens == null || fileAnalysis.highlightingTokens.isEmpty()) {
+              visitor.scanTree(context);
+              fileAnalysis.highlightingTokens = ((HighlighterVisitor) visitor).getHighlightingTokens();
+              highlightingTokenAlreadySaved = true;
+            }
+          } else if (!(visitor instanceof JavaScriptCheck)) {
             visitor.scanTree(context);
           }
         }
         long endTimeVisitors = System.nanoTime();
         visitorTime += (endTimeVisitors - startTimeVisitors);
         saveIssue(sensorContext, fileAnalysis.issues, inputFile);
+        // CPD
+        NewCpdTokens newCpdTokens = sensorContext.newCpdTokens().onFile(inputFile);
+        fileAnalysis.cpdTokens.forEach(cpdToken -> {
+          TextRange textRange = inputFile.newRange(cpdToken.startLine, cpdToken.startLineOffset, cpdToken.endLine, cpdToken.endLineOffset);
+          newCpdTokens.addToken(textRange, cpdToken.image);
+        });
+        if (!cpdTokenAlreadySaved && !sensorContext.runtime().getProduct().equals(SonarProduct.SONARLINT)) {
+          newCpdTokens.save();
+        }
+        // HIGHLIGHTING
+        NewHighlighting newHighlighting = sensorContext.newHighlighting().onFile(inputFile);
+        fileAnalysis.highlightingTokens.forEach(highlightToken ->
+          newHighlighting.highlight(highlightToken.startLine, highlightToken.startLineOffset, highlightToken.endLine, highlightToken.endLineOffset, highlightToken.type));
+        if (!highlightingTokenAlreadySaved && !sensorContext.runtime().getProduct().equals(SonarProduct.SONARLINT)) {
+          newHighlighting.save();
+        }
+        // NOSONAR LINES
+        noSonarFilter.noSonarInFile(inputFile, fileAnalysis.noSonarLines);
         long startTimeHighlighting = System.nanoTime();
         executor.highlightSymbols(inputFile, context);
         long endTimeHighlighting = System.nanoTime();
@@ -274,16 +311,28 @@ public class JavaScriptSensor implements Sensor {
   private void scanFile(SensorContext sensorContext, InputFile inputFile, ProductDependentExecutor executor, List<TreeVisitor> visitors, ScriptTree scriptTree, @CheckForNull BigInteger encodedFileContent) {
     JavaScriptVisitorContext context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
     List<Issue> fileIssues = new ArrayList<>();
+    List<CpdVisitor.CpdToken> cpdTokens = new ArrayList<>();
+    List<HighlighterVisitor.HighlightToken> highlightingTokens = new ArrayList<>();
+    Set<Integer> noSonarLines = new HashSet<>();
     for (TreeVisitor visitor : visitors) {
       if (visitor instanceof JavaScriptCheck) {
         fileIssues.addAll(((JavaScriptCheck) visitor).scanFile(context));
+      } else if (visitor instanceof CpdVisitor) {
+        visitor.scanTree(context);
+        cpdTokens = ((CpdVisitor) visitor).getTokens();
+      } else if (visitor instanceof HighlighterVisitor) {
+        visitor.scanTree(context);
+        highlightingTokens = ((HighlighterVisitor) visitor).getHighlightingTokens();
+      } else if (visitor instanceof NoSonarVisitor) {
+        visitor.scanTree(context);
+        noSonarLines = ((NoSonarVisitor) visitor).getNoSonarLines();
       } else {
         visitor.scanTree(context);
       }
     }
     List<SerializableIssue> serializableIssues = getSerializableIssues(fileIssues);
     if (encodedFileContent != null) {
-      analysisState.put(inputFile.uri().getPath(), new FileAnalysis(encodedFileContent, serializableIssues));
+      analysisState.put(inputFile.uri().getPath(), new FileAnalysis(encodedFileContent, serializableIssues, cpdTokens, highlightingTokens, noSonarLines));
     }
     saveIssue(sensorContext, serializableIssues, inputFile);
     executor.highlightSymbols(inputFile, context);
@@ -537,13 +586,19 @@ public class JavaScriptSensor implements Sensor {
     }
   }
 
-  static class FileAnalysis {
+  public static class FileAnalysis {
     BigInteger encodedFileContent;
     List<SerializableIssue> issues;
+    List<CpdVisitor.CpdToken> cpdTokens;
+    List<HighlighterVisitor.HighlightToken> highlightingTokens;
+    Set<Integer> noSonarLines;
 
-    FileAnalysis(BigInteger encodedFileContent, List<SerializableIssue> issues) {
+    FileAnalysis(BigInteger encodedFileContent, List<SerializableIssue> issues, List<CpdVisitor.CpdToken> cpdTokens, List<HighlighterVisitor.HighlightToken> highlightingTokens, Set<Integer> noSonarLines) {
       this.encodedFileContent = encodedFileContent;
       this.issues = issues;
+      this.cpdTokens = cpdTokens;
+      this.highlightingTokens = highlightingTokens;
+      this.noSonarLines = noSonarLines;
     }
   }
 

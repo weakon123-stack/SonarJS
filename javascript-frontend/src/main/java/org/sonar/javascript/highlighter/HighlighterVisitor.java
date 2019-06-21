@@ -20,6 +20,8 @@
 package org.sonar.javascript.highlighter;
 
 import com.google.common.collect.ImmutableSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import org.sonar.api.batch.fs.InputFile;
 import org.sonar.api.batch.sensor.SensorContext;
@@ -46,8 +48,14 @@ public class HighlighterVisitor extends SubscriptionVisitor {
   private final SensorContext sensorContext;
   private NewHighlighting highlighting;
 
+  private List<HighlightToken> highlightingTokens = new ArrayList<>();
+
   public HighlighterVisitor(SensorContext sensorContext) {
     this.sensorContext = sensorContext;
+  }
+
+  public List<HighlightToken> getHighlightingTokens() {
+    return highlightingTokens;
   }
 
   @Override
@@ -150,6 +158,7 @@ public class HighlighterVisitor extends SubscriptionVisitor {
   }
 
   private void highlight(SyntaxToken token, TypeOfText type) {
+    highlightingTokens.add(new HighlightToken(token.line(), token.column(), token.endLine(), token.endColumn(), type));
     highlighting.highlight(token.line(), token.column(), token.endLine(), token.endColumn(), type);
   }
 
@@ -160,6 +169,22 @@ public class HighlighterVisitor extends SubscriptionVisitor {
       }
     }
     return false;
+  }
+
+  public class HighlightToken {
+    public int startLine;
+    public int startLineOffset;
+    public int endLine;
+    public int endLineOffset;
+    public TypeOfText type;
+
+    public HighlightToken(int startLine, int startLineOffset, int endLine, int endLineOffset, TypeOfText type) {
+      this.startLine = startLine;
+      this.startLineOffset = startLineOffset;
+      this.endLine = endLine;
+      this.endLineOffset = endLineOffset;
+      this.type = type;
+    }
   }
 
 }

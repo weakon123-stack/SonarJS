@@ -20,6 +20,8 @@
 package org.sonar.javascript.cpd;
 
 import com.google.common.collect.ImmutableSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import org.sonar.api.batch.fs.InputFile;
 import org.sonar.api.batch.fs.TextRange;
@@ -37,6 +39,7 @@ public class CpdVisitor extends SubscriptionVisitor {
   private final SensorContext sensorContext;
   private InputFile inputFile;
   private NewCpdTokens cpdTokens;
+  private List<CpdToken> tokens = new ArrayList<>();
 
   public CpdVisitor(SensorContext sensorContext) {
     this.sensorContext = sensorContext;
@@ -74,7 +77,27 @@ public class CpdVisitor extends SubscriptionVisitor {
     }
 
     TextRange range = inputFile.newRange(token.line(), token.column(), token.endLine(), token.endColumn());
-    cpdTokens.addToken(range, text);
+    tokens.add(new CpdToken(token.line(), token.column(), token.endLine(), token.endColumn(), text));
+    this.cpdTokens.addToken(range, text);
   }
 
+  public List<CpdToken> getTokens() {
+    return tokens;
+  }
+
+  public class CpdToken {
+    public int startLine;
+    public int startLineOffset;
+    public int endLine;
+    public int endLineOffset;
+    public String image;
+
+    public CpdToken(int startLine, int startLineOffset, int endLine, int endLineOffset, String image) {
+      this.startLine = startLine;
+      this.startLineOffset = startLineOffset;
+      this.endLine = endLine;
+      this.endLineOffset = endLineOffset;
+      this.image = image;
+    }
+  }
 }

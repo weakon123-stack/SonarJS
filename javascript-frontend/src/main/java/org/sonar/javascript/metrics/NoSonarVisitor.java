@@ -20,6 +20,7 @@
 package org.sonar.javascript.metrics;
 
 
+import java.util.Set;
 import org.sonar.api.batch.fs.InputFile;
 import org.sonar.api.issue.NoSonarFilter;
 import org.sonar.javascript.visitors.JavaScriptFileImpl;
@@ -30,6 +31,7 @@ public class NoSonarVisitor extends DoubleDispatchVisitor {
 
   private final NoSonarFilter noSonarFilter;
   private final boolean ignoreHeaderComments;
+  private Set<Integer> noSonarLines;
 
   public NoSonarVisitor(NoSonarFilter noSonarFilter, boolean ignoreHeaderComments) {
     this.noSonarFilter = noSonarFilter;
@@ -41,6 +43,11 @@ public class NoSonarVisitor extends DoubleDispatchVisitor {
     CommentLineVisitor commentVisitor = new CommentLineVisitor(tree, ignoreHeaderComments);
 
     InputFile inputFile = ((JavaScriptFileImpl) getContext().getJavaScriptFile()).inputFile();
+    this.noSonarLines = commentVisitor.noSonarLines();
     noSonarFilter.noSonarInFile(inputFile, commentVisitor.noSonarLines());
+  }
+
+  public Set<Integer> getNoSonarLines() {
+    return noSonarLines;
   }
 }
