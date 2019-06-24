@@ -41,9 +41,11 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -65,8 +67,11 @@ import org.sonar.api.batch.sensor.cpd.NewCpdTokens;
 import org.sonar.api.batch.sensor.highlighting.NewHighlighting;
 import org.sonar.api.batch.sensor.issue.NewIssue;
 import org.sonar.api.batch.sensor.issue.NewIssueLocation;
+import org.sonar.api.batch.sensor.symbol.NewSymbol;
 import org.sonar.api.batch.sensor.symbol.NewSymbolTable;
 import org.sonar.api.issue.NoSonarFilter;
+import org.sonar.api.measures.CoreMetrics;
+import org.sonar.api.measures.FileLinesContext;
 import org.sonar.api.measures.FileLinesContextFactory;
 import org.sonar.api.rule.RuleKey;
 import org.sonar.api.utils.log.Logger;
@@ -111,9 +116,7 @@ public class JavaScriptSensor implements Sensor {
   // parsingErrorRuleKey equals null if ParsingErrorCheck is not activated
   private RuleKey parsingErrorRuleKey = null;
   private HashMap<String, FileAnalysis> analysisState = new HashMap<>();
-  private long parsingTime = 0;
-  private long visitorTime = 0;
-  private long highlightingTime = 0;
+  private long storingTime = 0;
 
   public JavaScriptSensor(
     CheckFactory checkFactory, FileLinesContextFactory fileLinesContextFactory, FileSystem fileSystem, NoSonarFilter noSonarFilter) {
@@ -201,44 +204,57 @@ public class JavaScriptSensor implements Sensor {
       LOG.debug("Couldn't create hash for file " + inputFile.filename(), e);
     }
 
-    ScriptTree scriptTree;
+    ScriptTree scriptTree = null;
 
     try {
       boolean cpdTokenAlreadySaved = false;
       boolean highlightingTokenAlreadySaved = false;
-      long startTimeParsing = System.nanoTime();
-      scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
-      JavaScriptVisitorContext context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
-      long endTimeParsing = System.nanoTime();
-      parsingTime += (endTimeParsing - startTimeParsing);
+      boolean metricsAlreadySaved = false;
+      JavaScriptVisitorContext context = null;
       FileAnalysis fileAnalysis = analysisState.get(inputFile.uri().getPath());
       if (fileAnalysis != null && fileAnalysis.encodedFileContent.equals(encodedFileContent)) {
         long startTimeVisitors = System.nanoTime();
         for (TreeVisitor visitor : visitors) {
           if (visitor instanceof CpdVisitor) {
             if (fileAnalysis.cpdTokens == null || fileAnalysis.cpdTokens.isEmpty()) {
+              if (context == null) {
+                scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
+                context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
+              }
               visitor.scanTree(context);
               fileAnalysis.cpdTokens = ((CpdVisitor) visitor).getTokens();
               cpdTokenAlreadySaved = true;
             }
           } else if (visitor instanceof HighlighterVisitor) {
             if (fileAnalysis.highlightingTokens == null || fileAnalysis.highlightingTokens.isEmpty()) {
+              if (context == null) {
+                scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
+                context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
+              }
               visitor.scanTree(context);
               fileAnalysis.highlightingTokens = ((HighlighterVisitor) visitor).getHighlightingTokens();
               highlightingTokenAlreadySaved = true;
             }
-          } else if (!(visitor instanceof JavaScriptCheck)) {
-            visitor.scanTree(context);
+          } else if (visitor instanceof MetricsVisitor) {
+            if (fileAnalysis.metrics == null || fileAnalysis.metrics.isEmpty()) {
+              if (context == null) {
+                scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
+                context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
+              }
+              visitor.scanTree(context);
+              fileAnalysis.metrics = ((MetricsVisitor) visitor).getMetrics();
+              fileAnalysis.linesOfCode = ((MetricsVisitor) visitor).getLinesOfCode();
+              fileAnalysis.executableLines = ((MetricsVisitor) visitor).getExecutableLines();
+              metricsAlreadySaved = true;
+            }
           }
         }
-        long endTimeVisitors = System.nanoTime();
-        visitorTime += (endTimeVisitors - startTimeVisitors);
         saveIssue(sensorContext, fileAnalysis.issues, inputFile);
         // CPD
         NewCpdTokens newCpdTokens = sensorContext.newCpdTokens().onFile(inputFile);
         fileAnalysis.cpdTokens.forEach(cpdToken -> {
-          TextRange textRange = inputFile.newRange(cpdToken.startLine, cpdToken.startLineOffset, cpdToken.endLine, cpdToken.endLineOffset);
-          newCpdTokens.addToken(textRange, cpdToken.image);
+          TextRange textRange = inputFile.newRange(cpdToken.l[0], cpdToken.l[1], cpdToken.l[2], cpdToken.l[3]);
+          newCpdTokens.addToken(textRange, cpdToken.i);
         });
         if (!cpdTokenAlreadySaved && !sensorContext.runtime().getProduct().equals(SonarProduct.SONARLINT)) {
           newCpdTokens.save();
@@ -246,18 +262,28 @@ public class JavaScriptSensor implements Sensor {
         // HIGHLIGHTING
         NewHighlighting newHighlighting = sensorContext.newHighlighting().onFile(inputFile);
         fileAnalysis.highlightingTokens.forEach(highlightToken ->
-          newHighlighting.highlight(highlightToken.startLine, highlightToken.startLineOffset, highlightToken.endLine, highlightToken.endLineOffset, highlightToken.type));
+          newHighlighting.highlight(highlightToken.l[0], highlightToken.l[1], highlightToken.l[2], highlightToken.l[3], highlightToken.t));
         if (!highlightingTokenAlreadySaved && !sensorContext.runtime().getProduct().equals(SonarProduct.SONARLINT)) {
           newHighlighting.save();
         }
         // NOSONAR LINES
         noSonarFilter.noSonarInFile(inputFile, fileAnalysis.noSonarLines);
-        long startTimeHighlighting = System.nanoTime();
-        executor.highlightSymbols(inputFile, context);
-        long endTimeHighlighting = System.nanoTime();
-        highlightingTime += (endTimeHighlighting - startTimeHighlighting);
+        // METRICS
+        if (!metricsAlreadySaved && !sensorContext.runtime().getProduct().equals(SonarProduct.SONARLINT)) {
+          saveMetrics(sensorContext, inputFile, fileAnalysis);
+        }
+        // SYMBOL HIGHLIGHTING
+        NewSymbolTable newSymbolTable = sensorContext.newSymbolTable().onFile(inputFile);
+        fileAnalysis.serializableSymbols.forEach(serializableSymbol -> {
+          NewSymbol newSymbol = newSymbolTable.newSymbol(serializableSymbol.l[0], serializableSymbol.l[1], serializableSymbol.l[2], serializableSymbol.l[3]);
+          serializableSymbol.r.forEach(symbolReference -> newSymbol.newReference(symbolReference.l[0], symbolReference.l[1], symbolReference.l[2], symbolReference.l[3]));
+        });
+        if (!sensorContext.runtime().getProduct().equals(SonarProduct.SONARLINT)) {
+          newSymbolTable.save();
+        }
         return;
       }
+      scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
       scanFile(sensorContext, inputFile, executor, visitors, scriptTree, encodedFileContent);
     } catch (RecognitionException e) {
       checkInterrupted(e);
@@ -269,6 +295,77 @@ public class JavaScriptSensor implements Sensor {
       processException(e, sensorContext, inputFile);
       LOG.error("Unable to analyse file: " + inputFile.uri(), e);
     }
+  }
+
+  private void saveMetrics(SensorContext sensorContext, InputFile inputFile, FileAnalysis fileAnalysis) {
+    String ncloc = fileAnalysis.metrics.get(CoreMetrics.NCLOC.getName());
+    if (ncloc != null) {
+      sensorContext.<Integer>newMeasure()
+        .withValue(Integer.parseInt(ncloc))
+        .forMetric(CoreMetrics.NCLOC)
+        .on(inputFile)
+        .save();
+    }
+
+    String cognitiveComplexity = fileAnalysis.metrics.get(CoreMetrics.COGNITIVE_COMPLEXITY.getName());
+    if (cognitiveComplexity != null) {
+      sensorContext.<Integer>newMeasure()
+        .withValue(Integer.parseInt(cognitiveComplexity))
+        .forMetric(CoreMetrics.COGNITIVE_COMPLEXITY)
+        .on(inputFile)
+        .save();
+    }
+
+    String complexity = fileAnalysis.metrics.get(CoreMetrics.COMPLEXITY.getName());
+    if (complexity != null) {
+      sensorContext.<Integer>newMeasure()
+        .withValue(Integer.parseInt(complexity))
+        .forMetric(CoreMetrics.COMPLEXITY)
+        .on(inputFile)
+        .save();
+    }
+
+
+    String commentLines = fileAnalysis.metrics.get(CoreMetrics.COMMENT_LINES.getName());
+    if (commentLines != null) {
+      sensorContext.<Integer>newMeasure()
+        .withValue(Integer.parseInt(commentLines))
+        .forMetric(CoreMetrics.COMMENT_LINES)
+        .on(inputFile)
+        .save();
+    }
+
+    String functions = fileAnalysis.metrics.get(CoreMetrics.FUNCTIONS.getName());
+    if (functions != null) {
+      sensorContext.<Integer>newMeasure()
+        .withValue(Integer.parseInt(functions))
+        .forMetric(CoreMetrics.FUNCTIONS)
+        .on(inputFile)
+        .save();
+    }
+
+    String statements = fileAnalysis.metrics.get(CoreMetrics.STATEMENTS.getName());
+    if (statements != null) {
+      sensorContext.<Integer>newMeasure()
+        .withValue(Integer.parseInt(statements))
+        .forMetric(CoreMetrics.STATEMENTS)
+        .on(inputFile)
+        .save();
+    }
+
+    String classes = fileAnalysis.metrics.get(CoreMetrics.CLASSES.getName());
+    if (classes != null) {
+      sensorContext.<Integer>newMeasure()
+        .withValue(Integer.parseInt(classes))
+        .forMetric(CoreMetrics.CLASSES)
+        .on(inputFile)
+        .save();
+    }
+
+    FileLinesContext fileLinesContext = fileLinesContextFactory.createFor(inputFile);
+    fileAnalysis.linesOfCode.forEach(line -> fileLinesContext.setIntValue(CoreMetrics.NCLOC_DATA_KEY, line, 1));
+    fileAnalysis.executableLines.forEach(line -> fileLinesContext.setIntValue(CoreMetrics.EXECUTABLE_LINES_DATA_KEY, line, 1));
+    fileLinesContext.save();
   }
 
   private static void checkInterrupted(Exception e) {
@@ -314,6 +411,9 @@ public class JavaScriptSensor implements Sensor {
     List<CpdVisitor.CpdToken> cpdTokens = new ArrayList<>();
     List<HighlighterVisitor.HighlightToken> highlightingTokens = new ArrayList<>();
     Set<Integer> noSonarLines = new HashSet<>();
+    Set<Integer> linesOfCode = new HashSet<>();
+    Set<Integer> executableLines = new HashSet<>();
+    Map<String, String> metrics = new HashMap<>();
     for (TreeVisitor visitor : visitors) {
       if (visitor instanceof JavaScriptCheck) {
         fileIssues.addAll(((JavaScriptCheck) visitor).scanFile(context));
@@ -326,16 +426,22 @@ public class JavaScriptSensor implements Sensor {
       } else if (visitor instanceof NoSonarVisitor) {
         visitor.scanTree(context);
         noSonarLines = ((NoSonarVisitor) visitor).getNoSonarLines();
+      } else if (visitor instanceof MetricsVisitor) {
+        visitor.scanTree(context);
+        linesOfCode = ((MetricsVisitor) visitor).getLinesOfCode();
+        executableLines = ((MetricsVisitor) visitor).getExecutableLines();
+        metrics = ((MetricsVisitor) visitor).getMetrics();
       } else {
         visitor.scanTree(context);
       }
     }
     List<SerializableIssue> serializableIssues = getSerializableIssues(fileIssues);
-    if (encodedFileContent != null) {
-      analysisState.put(inputFile.uri().getPath(), new FileAnalysis(encodedFileContent, serializableIssues, cpdTokens, highlightingTokens, noSonarLines));
-    }
     saveIssue(sensorContext, serializableIssues, inputFile);
-    executor.highlightSymbols(inputFile, context);
+    List<HighlightSymbolTableBuilder.SerializableSymbol> serializableSymbols = executor.highlightSymbols(inputFile, context);
+    if (encodedFileContent != null) {
+      analysisState.put(inputFile.uri().getPath(),
+        new FileAnalysis(encodedFileContent, serializableIssues, cpdTokens, highlightingTokens, noSonarLines, metrics, linesOfCode, executableLines, serializableSymbols));
+    }
   }
 
   private List<SerializableIssue> getSerializableIssues(List<Issue> fileIssues) {
@@ -463,6 +569,7 @@ public class JavaScriptSensor implements Sensor {
     ProgressReport progressReport = new ProgressReport("Report about progress of Javascript analyzer", TimeUnit.SECONDS.toMillis(10));
     progressReport.start(files);
     // Load analysis state
+    long startTimeLoading = System.nanoTime();
     Gson gson = new Gson();
     try {
       java.lang.reflect.Type type = new TypeToken<HashMap<String, FileAnalysis>>() {
@@ -475,12 +582,13 @@ public class JavaScriptSensor implements Sensor {
     } catch (FileNotFoundException e) {
       LOG.debug("Cannot load analysisState file");
     }
-
+    long endTimeLoading = System.nanoTime();
+    LOG.info("Loading time = " + (endTimeLoading - startTimeLoading) / 1000000 + " ms");
     analyseFiles(context, treeVisitors, inputFiles, executor, progressReport);
+    long startTimeStoring = System.nanoTime();
     storeAnalysisState(gson);
-    LOG.info("Parsing time = " + parsingTime  / 1000000 + " ms");
-    LOG.info("Visitors time = " + visitorTime  / 1000000 + " ms");
-    LOG.info("Highlighting time = " + highlightingTime  / 1000000 + " ms");
+    long endTimeStoring = System.nanoTime();
+    LOG.info("Storing time = " + (endTimeStoring - startTimeStoring) / 1000000 + " ms");
   }
 
   private void storeAnalysisState(Gson gson) {
@@ -514,7 +622,7 @@ public class JavaScriptSensor implements Sensor {
   protected interface ProductDependentExecutor {
     List<TreeVisitor> getProductDependentTreeVisitors();
 
-    void highlightSymbols(InputFile inputFile, TreeVisitorContext treeVisitorContext);
+    List<HighlightSymbolTableBuilder.SerializableSymbol> highlightSymbols(InputFile inputFile, TreeVisitorContext treeVisitorContext);
   }
 
   private static class SonarQubeProductExecutor implements ProductDependentExecutor {
@@ -545,9 +653,11 @@ public class JavaScriptSensor implements Sensor {
     }
 
     @Override
-    public void highlightSymbols(InputFile inputFile, TreeVisitorContext treeVisitorContext) {
+    public List<HighlightSymbolTableBuilder.SerializableSymbol> highlightSymbols(InputFile inputFile, TreeVisitorContext treeVisitorContext) {
       NewSymbolTable newSymbolTable = context.newSymbolTable().onFile(inputFile);
-      HighlightSymbolTableBuilder.build(newSymbolTable, treeVisitorContext);
+      HashMap<NewSymbol, HighlightSymbolTableBuilder.SerializableSymbol> serializableSymbols = new HashMap<>();
+      HighlightSymbolTableBuilder.build(newSymbolTable, treeVisitorContext, serializableSymbols);
+      return new ArrayList<>(serializableSymbols.values());
     }
   }
 
@@ -567,8 +677,9 @@ public class JavaScriptSensor implements Sensor {
     }
 
     @Override
-    public void highlightSymbols(InputFile inputFile, TreeVisitorContext treeVisitorContext) {
+    public List<HighlightSymbolTableBuilder.SerializableSymbol> highlightSymbols(InputFile inputFile, TreeVisitorContext treeVisitorContext) {
       // unnecessary in SonarLint context
+      return Collections.emptyList();
     }
   }
 
@@ -587,18 +698,26 @@ public class JavaScriptSensor implements Sensor {
   }
 
   public static class FileAnalysis {
+    List<HighlightSymbolTableBuilder.SerializableSymbol> serializableSymbols;
+    Set<Integer> executableLines;
+    Set<Integer> linesOfCode;
+    Map<String, String> metrics;
     BigInteger encodedFileContent;
     List<SerializableIssue> issues;
     List<CpdVisitor.CpdToken> cpdTokens;
     List<HighlighterVisitor.HighlightToken> highlightingTokens;
     Set<Integer> noSonarLines;
 
-    FileAnalysis(BigInteger encodedFileContent, List<SerializableIssue> issues, List<CpdVisitor.CpdToken> cpdTokens, List<HighlighterVisitor.HighlightToken> highlightingTokens, Set<Integer> noSonarLines) {
+    FileAnalysis(BigInteger encodedFileContent, List<SerializableIssue> issues, List<CpdVisitor.CpdToken> cpdTokens, List<HighlighterVisitor.HighlightToken> highlightingTokens, Set<Integer> noSonarLines, Map<String, String> metrics, Set<Integer> linesOfCode, Set<Integer> executableLines, List<HighlightSymbolTableBuilder.SerializableSymbol> serializableSymbols) {
       this.encodedFileContent = encodedFileContent;
       this.issues = issues;
       this.cpdTokens = cpdTokens;
       this.highlightingTokens = highlightingTokens;
       this.noSonarLines = noSonarLines;
+      this.metrics = metrics;
+      this.linesOfCode = linesOfCode;
+      this.executableLines = executableLines;
+      this.serializableSymbols = serializableSymbols;
     }
   }
 

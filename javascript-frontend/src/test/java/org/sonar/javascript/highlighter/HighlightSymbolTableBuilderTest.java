@@ -25,6 +25,7 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
+import java.util.HashMap;
 import org.junit.Test;
 import org.sonar.api.batch.fs.TextRange;
 import org.sonar.api.batch.fs.internal.DefaultInputFile;
@@ -66,7 +67,7 @@ public class HighlightSymbolTableBuilderTest extends JavaScriptTreeModelTest {
   public void sonar_symbol_table() throws Exception {
     String filename = "symbolHighlighting.js";
     String key = "moduleKey:" + filename;
-    HighlightSymbolTableBuilder.build(newSymbolTable(filename), context(inputFile));
+    HighlightSymbolTableBuilder.build(newSymbolTable(filename), context(inputFile), new HashMap<>());
 
     // variable
     assertThat(references(key, 1, 4)).containsOnly(textRange(5, 0, 1), textRange(5, 6, 7));
@@ -94,7 +95,7 @@ public class HighlightSymbolTableBuilderTest extends JavaScriptTreeModelTest {
   public void sonar_symbol_table_built_in() throws Exception {
     String filename = "symbolHighlightingBuiltIn.js";
     String key = "moduleKey:" + filename;
-    HighlightSymbolTableBuilder.build(newSymbolTable(filename), context(inputFile));
+    HighlightSymbolTableBuilder.build(newSymbolTable(filename), context(inputFile), new HashMap<>());
 
     // arguments
     assertThat(references(key, 2, 14)).containsOnly(textRange(3, 2, 11), textRange(4, 2, 11));
@@ -107,7 +108,7 @@ public class HighlightSymbolTableBuilderTest extends JavaScriptTreeModelTest {
   public void byte_order_mark_should_not_increment_offset() throws Exception {
     String filename = "symbolHighlightingBom.js";
 
-    HighlightSymbolTableBuilder.build(newSymbolTable(filename), context(inputFile));
+    HighlightSymbolTableBuilder.build(newSymbolTable(filename), context(inputFile), new HashMap<>());
     assertThat(Files.toString(inputFile.file(), inputFile.charset()).startsWith("\uFEFF")).isTrue();
     assertThat(references("moduleKey:" + filename, 1, 4)).containsOnly(textRange(3, 0, 1));
   }
@@ -117,7 +118,7 @@ public class HighlightSymbolTableBuilderTest extends JavaScriptTreeModelTest {
     String filename = "symbolHighlightingProperties.js";
     String key = "moduleKey:" + filename;
 
-    HighlightSymbolTableBuilder.build(newSymbolTable(filename), context(inputFile));
+    HighlightSymbolTableBuilder.build(newSymbolTable(filename), context(inputFile), new HashMap<>());
 
     // class
     assertThat(references(key, 1, 6)).containsOnly(textRange(7, 16, 17));

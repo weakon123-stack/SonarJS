@@ -23,6 +23,7 @@ import java.io.Serializable;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import org.sonar.api.batch.fs.InputFile;
@@ -51,7 +52,9 @@ public class MetricsVisitor extends SubscriptionVisitor {
   private final Boolean ignoreHeaderComments;
   private FileLinesContextFactory fileLinesContextFactory;
   private Map<InputFile, Set<Integer>> projectExecutableLines;
-  private Map<Metric, Serializable> metrics = new HashMap<>();
+  private Map<String, String> metrics = new HashMap<>();
+  private Set<Integer> linesOfCode = new HashSet<>();
+  private Set<Integer> executableLines = new HashSet<>();
 
   public MetricsVisitor(SensorContext context, Boolean ignoreHeaderComments, FileLinesContextFactory fileLinesContextFactory) {
     this.sensorContext = context;
@@ -60,8 +63,16 @@ public class MetricsVisitor extends SubscriptionVisitor {
     this.projectExecutableLines = new HashMap<>();
   }
 
-  public Map<Metric, Serializable> getMetrics() {
+  public Map<String, String> getMetrics() {
     return metrics;
+  }
+
+  public Set<Integer> getLinesOfCode() {
+    return linesOfCode;
+  }
+
+  public Set<Integer> getExecutableLines() {
+    return executableLines;
   }
 
   /**
@@ -110,7 +121,7 @@ public class MetricsVisitor extends SubscriptionVisitor {
 
   private void saveLineMetrics(TreeVisitorContext context) {
     LineVisitor lineVisitor = new LineVisitor(context.getTopTree());
-    Set<Integer> linesOfCode = lineVisitor.getLinesOfCode();
+    linesOfCode = lineVisitor.getLinesOfCode();
 
     saveMetric(CoreMetrics.NCLOC, lineVisitor.getLinesOfCodeNumber());
 
@@ -122,7 +133,7 @@ public class MetricsVisitor extends SubscriptionVisitor {
 
     linesOfCode.forEach(line -> fileLinesContext.setIntValue(CoreMetrics.NCLOC_DATA_KEY, line, 1));
 
-    Set<Integer> executableLines = new ExecutableLineVisitor(context.getTopTree()).getExecutableLines();
+    executableLines = new ExecutableLineVisitor(context.getTopTree()).getExecutableLines();
     projectExecutableLines.put(inputFile, executableLines);
 
     executableLines.forEach(line -> fileLinesContext.setIntValue(CoreMetrics.EXECUTABLE_LINES_DATA_KEY, line, 1));
@@ -130,7 +141,7 @@ public class MetricsVisitor extends SubscriptionVisitor {
   }
 
   private <T extends Serializable> void saveMetric(Metric metric, T value) {
-    this.metrics.put(metric, value);
+    this.metrics.put(metric.getName(), value.toString());
     sensorContext.<T>newMeasure()
       .withValue(value)
       .forMetric(metric)

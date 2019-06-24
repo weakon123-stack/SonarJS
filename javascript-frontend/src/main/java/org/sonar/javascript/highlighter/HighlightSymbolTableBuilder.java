@@ -19,6 +19,8 @@
  */
 package org.sonar.javascript.highlighter;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
@@ -49,11 +51,11 @@ public class HighlightSymbolTableBuilder {
   private HighlightSymbolTableBuilder() {
   }
 
-  public static void build(NewSymbolTable newSymbolTable, TreeVisitorContext context) {
+  public static void build(NewSymbolTable newSymbolTable, TreeVisitorContext context, HashMap<NewSymbol, SerializableSymbol> serializableSymbols) {
     Set<ClassType> classTypes = new HashSet<>();
 
     for (Symbol symbol : context.getSymbolModel().getSymbols()) {
-      highlightSymbol(newSymbolTable, symbol);
+      highlightSymbol(newSymbolTable, symbol, serializableSymbols);
       if (symbol.kind() == Symbol.Kind.CLASS) {
         Type classType = symbol.types().getUniqueType(Kind.CLASS);
         if (classType != null) {
@@ -64,33 +66,55 @@ public class HighlightSymbolTableBuilder {
 
     for (ClassType classType : classTypes) {
       for (Symbol symbol : classType.properties()) {
-        highlightSymbol(newSymbolTable, symbol);
+        highlightSymbol(newSymbolTable, symbol, serializableSymbols);
       }
     }
 
-    (new BracesVisitor(newSymbolTable)).scanTree(context);
+    (new BracesVisitor(newSymbolTable, serializableSymbols)).scanTree(context);
     newSymbolTable.save();
   }
 
-  private static void highlightSymbol(NewSymbolTable newSymbolTable, Symbol symbol) {
+  private static void highlightSymbol(NewSymbolTable newSymbolTable, Symbol symbol, HashMap<NewSymbol, SerializableSymbol> serializableSymbols) {
     if (!symbol.usages().isEmpty()) {
       List<Usage> usagesList = new LinkedList<>(symbol.usages());
       SyntaxToken token = (usagesList.get(0).identifierTree()).identifierToken();
-      NewSymbol newSymbol = getHighlightedSymbol(newSymbolTable, token);
+      NewSymbol newSymbol = getHighlightedSymbol(newSymbolTable, token, serializableSymbols);
       for (int i = 1; i < usagesList.size(); i++) {
         SyntaxToken referenceToken = getToken(usagesList.get(i).identifierTree());
-        addReference(newSymbol, referenceToken);
+        addReference(newSymbol, referenceToken, serializableSymbols);
       }
 
     }
   }
 
-  private static void addReference(NewSymbol symbol, SyntaxToken referenceToken) {
+  static public class SerializableSymbol {
+    public int [] l;
+    public List<SymbolReference> r;
+
+    public SerializableSymbol(int[] l) {
+      this.l = l;
+      this.r = new ArrayList<>();
+    }
+  }
+
+  static public class SymbolReference {
+    public int [] l;
+
+    public SymbolReference(int[] l) {
+      this.l = l;
+    }
+  }
+
+  private static void addReference(NewSymbol symbol, SyntaxToken referenceToken, HashMap<NewSymbol, SerializableSymbol> serializableSymbols) {
+    SerializableSymbol serializableSymbol = serializableSymbols.get(symbol);
+    serializableSymbol.r.add(new SymbolReference(new int[] {referenceToken.line(), referenceToken.column(), referenceToken.line(), referenceToken.column() + referenceToken.text().length()}));
     symbol.newReference(referenceToken.line(), referenceToken.column(), referenceToken.line(), referenceToken.column() + referenceToken.text().length());
   }
 
-  private static NewSymbol getHighlightedSymbol(NewSymbolTable newSymbolTable, SyntaxToken token) {
-    return newSymbolTable.newSymbol(token.line(), token.column(), token.line(), token.column() + token.text().length());
+  private static NewSymbol getHighlightedSymbol(NewSymbolTable newSymbolTable, SyntaxToken token, HashMap<NewSymbol, SerializableSymbol> serializableSymbols) {
+    NewSymbol newSymbol = newSymbolTable.newSymbol(token.line(), token.column(), token.line(), token.column() + token.text().length());
+    serializableSymbols.put(newSymbol, new SerializableSymbol(new int[] {token.line(), token.column(), token.line(), token.column() + token.text().length()}));
+    return newSymbol;
   }
 
   private static SyntaxToken getToken(IdentifierTree identifierTree) {
@@ -100,9 +124,11 @@ public class HighlightSymbolTableBuilder {
   private static class BracesVisitor extends DoubleDispatchVisitor {
 
     private final NewSymbolTable newSymbolTable;
+    private final HashMap<NewSymbol, SerializableSymbol> serializableSymbols;
 
-    BracesVisitor(NewSymbolTable newSymbolTable) {
+    BracesVisitor(NewSymbolTable newSymbolTable, HashMap<NewSymbol, SerializableSymbol> serializableSymbols) {
       this.newSymbolTable = newSymbolTable;
+      this.serializableSymbols = serializableSymbols;
     }
 
     @Override
@@ -160,8 +186,8 @@ public class HighlightSymbolTableBuilder {
     }
 
     private void highlightBraces(SyntaxToken left, SyntaxToken right) {
-      NewSymbol symbol = getHighlightedSymbol(newSymbolTable, left);
-      addReference(symbol, right);
+      NewSymbol symbol = getHighlightedSymbol(newSymbolTable, left, serializableSymbols);
+      addReference(symbol, right, serializableSymbols);
     }
   }
 }

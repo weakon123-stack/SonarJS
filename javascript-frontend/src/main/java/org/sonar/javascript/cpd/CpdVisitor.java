@@ -54,6 +54,7 @@ public class CpdVisitor extends SubscriptionVisitor {
   public void visitFile(Tree scriptTree) {
     inputFile = ((JavaScriptFileImpl) getContext().getJavaScriptFile()).inputFile();
     cpdTokens = sensorContext.newCpdTokens().onFile(inputFile);
+    tokens = new ArrayList<>();
     super.visitFile(scriptTree);
   }
 
@@ -86,18 +87,12 @@ public class CpdVisitor extends SubscriptionVisitor {
   }
 
   public class CpdToken {
-    public int startLine;
-    public int startLineOffset;
-    public int endLine;
-    public int endLineOffset;
-    public String image;
+    public int[] l;
+    public String i;
 
     public CpdToken(int startLine, int startLineOffset, int endLine, int endLineOffset, String image) {
-      this.startLine = startLine;
-      this.startLineOffset = startLineOffset;
-      this.endLine = endLine;
-      this.endLineOffset = endLineOffset;
-      this.image = image;
+      l = new int[] {startLine, startLineOffset, endLine, endLineOffset};
+      this.i = image;
     }
   }
 }

@@ -79,6 +79,7 @@ public class HighlighterVisitor extends SubscriptionVisitor {
 
   @Override
   public void visitFile(Tree scriptTree) {
+    highlightingTokens = new ArrayList<>();
     InputFile inputFile = ((JavaScriptFileImpl) getContext().getJavaScriptFile()).inputFile();
     highlighting = sensorContext.newHighlighting().onFile(inputFile);
   }
@@ -172,18 +173,12 @@ public class HighlighterVisitor extends SubscriptionVisitor {
   }
 
   public class HighlightToken {
-    public int startLine;
-    public int startLineOffset;
-    public int endLine;
-    public int endLineOffset;
-    public TypeOfText type;
+    public int [] l;
+    public TypeOfText t;
 
     public HighlightToken(int startLine, int startLineOffset, int endLine, int endLineOffset, TypeOfText type) {
-      this.startLine = startLine;
-      this.startLineOffset = startLineOffset;
-      this.endLine = endLine;
-      this.endLineOffset = endLineOffset;
-      this.type = type;
+      l = new int[] {startLine, startLineOffset, endLine, endLineOffset};
+      this.t = type;
     }
   }
 
