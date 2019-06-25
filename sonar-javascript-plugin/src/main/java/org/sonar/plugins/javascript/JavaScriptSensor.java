@@ -24,14 +24,9 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
-import com.google.gson.stream.JsonReader;
 import com.sonar.sslr.api.RecognitionException;
 import com.sonar.sslr.api.typed.ActionParser;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
-import java.io.FileWriter;
+import java.io.File;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.math.BigInteger;
@@ -99,6 +94,9 @@ import org.sonar.plugins.javascript.api.visitors.TreeVisitor;
 import org.sonar.plugins.javascript.api.visitors.TreeVisitorContext;
 import org.sonarsource.analyzer.commons.ProgressReport;
 
+import static org.sonar.plugins.javascript.FastFurious.FileAnalysis;
+import static org.sonar.plugins.javascript.FastFurious.SecondaryIssueLocation;
+import static org.sonar.plugins.javascript.FastFurious.SerializableIssue;
 import static org.sonar.plugins.javascript.JavaScriptPlugin.DEPRECATED_ESLINT_PROPERTY;
 import static org.sonar.plugins.javascript.JavaScriptPlugin.ESLINT_REPORT_PATHS;
 
@@ -115,8 +113,10 @@ public class JavaScriptSensor implements Sensor {
   private final ActionParser<Tree> vueParser;
   // parsingErrorRuleKey equals null if ParsingErrorCheck is not activated
   private RuleKey parsingErrorRuleKey = null;
-  private HashMap<String, FileAnalysis> analysisState = new HashMap<>();
-  private long storingTime = 0;
+  private Map<String, FileAnalysis> analysisState = new HashMap<>();
+  private Map<String, FileAnalysis> newAnalysisState = new HashMap<>();
+  private long cachedAnalysisReponse = 0;
+  private int nonCachedFiles = 0;
 
   public JavaScriptSensor(
     CheckFactory checkFactory, FileLinesContextFactory fileLinesContextFactory, FileSystem fileSystem, NoSonarFilter noSonarFilter) {
@@ -204,7 +204,7 @@ public class JavaScriptSensor implements Sensor {
       LOG.debug("Couldn't create hash for file " + inputFile.filename(), e);
     }
 
-    ScriptTree scriptTree = null;
+    ScriptTree scriptTree;
 
     try {
       boolean cpdTokenAlreadySaved = false;
@@ -213,11 +213,12 @@ public class JavaScriptSensor implements Sensor {
       JavaScriptVisitorContext context = null;
       FileAnalysis fileAnalysis = analysisState.get(inputFile.uri().getPath());
       if (fileAnalysis != null && fileAnalysis.encodedFileContent.equals(encodedFileContent)) {
-        long startTimeVisitors = System.nanoTime();
+        long startAnalysisResponse = System.nanoTime();
         for (TreeVisitor visitor : visitors) {
           if (visitor instanceof CpdVisitor) {
             if (fileAnalysis.cpdTokens == null || fileAnalysis.cpdTokens.isEmpty()) {
               if (context == null) {
+                nonCachedFiles++;
                 scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
                 context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
               }
@@ -228,6 +229,7 @@ public class JavaScriptSensor implements Sensor {
           } else if (visitor instanceof HighlighterVisitor) {
             if (fileAnalysis.highlightingTokens == null || fileAnalysis.highlightingTokens.isEmpty()) {
               if (context == null) {
+                nonCachedFiles++;
                 scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
                 context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
               }
@@ -238,6 +240,7 @@ public class JavaScriptSensor implements Sensor {
           } else if (visitor instanceof MetricsVisitor) {
             if (fileAnalysis.metrics == null || fileAnalysis.metrics.isEmpty()) {
               if (context == null) {
+                nonCachedFiles++;
                 scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
                 context = new JavaScriptVisitorContext(scriptTree, inputFile, sensorContext.config());
               }
@@ -274,15 +277,19 @@ public class JavaScriptSensor implements Sensor {
         }
         // SYMBOL HIGHLIGHTING
         NewSymbolTable newSymbolTable = sensorContext.newSymbolTable().onFile(inputFile);
-        fileAnalysis.serializableSymbols.forEach(serializableSymbol -> {
+        fileAnalysis.symbolsToHighlight.forEach(serializableSymbol -> {
           NewSymbol newSymbol = newSymbolTable.newSymbol(serializableSymbol.l[0], serializableSymbol.l[1], serializableSymbol.l[2], serializableSymbol.l[3]);
           serializableSymbol.r.forEach(symbolReference -> newSymbol.newReference(symbolReference.l[0], symbolReference.l[1], symbolReference.l[2], symbolReference.l[3]));
         });
         if (!sensorContext.runtime().getProduct().equals(SonarProduct.SONARLINT)) {
           newSymbolTable.save();
         }
+        newAnalysisState.put(inputFile.uri().getPath(), fileAnalysis);
+        long endAnalysisResponse = System.nanoTime();
+        this.cachedAnalysisReponse += (endAnalysisResponse - startAnalysisResponse);
         return;
       }
+      nonCachedFiles++;
       scriptTree = (ScriptTree) currentParser.parse(inputFile.contents());
       scanFile(sensorContext, inputFile, executor, visitors, scriptTree, encodedFileContent);
     } catch (RecognitionException e) {
@@ -439,7 +446,7 @@ public class JavaScriptSensor implements Sensor {
     saveIssue(sensorContext, serializableIssues, inputFile);
     List<HighlightSymbolTableBuilder.SerializableSymbol> serializableSymbols = executor.highlightSymbols(inputFile, context);
     if (encodedFileContent != null) {
-      analysisState.put(inputFile.uri().getPath(),
+      newAnalysisState.put(inputFile.uri().getPath(),
         new FileAnalysis(encodedFileContent, serializableIssues, cpdTokens, highlightingTokens, noSonarLines, metrics, linesOfCode, executableLines, serializableSymbols));
     }
   }
@@ -567,39 +574,22 @@ public class JavaScriptSensor implements Sensor {
       .collect(Collectors.toList());
 
     ProgressReport progressReport = new ProgressReport("Report about progress of Javascript analyzer", TimeUnit.SECONDS.toMillis(10));
+    File analysisStateJavaScriptSensor = new File("analysisStateJavaScriptSensor");
     progressReport.start(files);
     // Load analysis state
-    long startTimeLoading = System.nanoTime();
-    Gson gson = new Gson();
-    try {
-      java.lang.reflect.Type type = new TypeToken<HashMap<String, FileAnalysis>>() {
-      }.getType();
-      JsonReader reader = new JsonReader(new FileReader("analysisStateJavaScriptSensor.json"));
-      HashMap<String, FileAnalysis> loadedAnalysisState = gson.fromJson(reader, type);
-      if (loadedAnalysisState != null) {
-        this.analysisState = loadedAnalysisState;
-      }
-    } catch (FileNotFoundException e) {
-      LOG.debug("Cannot load analysisState file");
+    if (analysisStateJavaScriptSensor.exists()) {
+      long startTimeLoading = System.nanoTime();
+      this.analysisState = FastFurious.read(analysisStateJavaScriptSensor);
+      long endTimeLoading = System.nanoTime();
+      LOG.info("Loading time = " + (endTimeLoading - startTimeLoading) / 1000000 + " ms");
     }
-    long endTimeLoading = System.nanoTime();
-    LOG.info("Loading time = " + (endTimeLoading - startTimeLoading) / 1000000 + " ms");
     analyseFiles(context, treeVisitors, inputFiles, executor, progressReport);
     long startTimeStoring = System.nanoTime();
-    storeAnalysisState(gson);
+    FastFurious.write(analysisStateJavaScriptSensor, newAnalysisState);
     long endTimeStoring = System.nanoTime();
     LOG.info("Storing time = " + (endTimeStoring - startTimeStoring) / 1000000 + " ms");
-  }
-
-  private void storeAnalysisState(Gson gson) {
-    try {
-      FileWriter writer = new FileWriter("analysisStateJavaScriptSensor.json");
-      gson.toJson(this.analysisState, writer);
-      writer.flush();
-      writer.close();
-    } catch (IOException e) {
-      LOG.debug("Cannot store analysisState file");
-    }
+    LOG.info("Cached analysis response = " + cachedAnalysisReponse / 1000000 + " ms");
+    LOG.info("Non Cached files = " + nonCachedFiles);
   }
 
   /**
@@ -695,49 +685,6 @@ public class JavaScriptSensor implements Sensor {
     AnalysisException(String message, Throwable cause) {
       super(message, cause);
     }
-  }
-
-  public static class FileAnalysis {
-    List<HighlightSymbolTableBuilder.SerializableSymbol> serializableSymbols;
-    Set<Integer> executableLines;
-    Set<Integer> linesOfCode;
-    Map<String, String> metrics;
-    BigInteger encodedFileContent;
-    List<SerializableIssue> issues;
-    List<CpdVisitor.CpdToken> cpdTokens;
-    List<HighlighterVisitor.HighlightToken> highlightingTokens;
-    Set<Integer> noSonarLines;
-
-    FileAnalysis(BigInteger encodedFileContent, List<SerializableIssue> issues, List<CpdVisitor.CpdToken> cpdTokens, List<HighlighterVisitor.HighlightToken> highlightingTokens, Set<Integer> noSonarLines, Map<String, String> metrics, Set<Integer> linesOfCode, Set<Integer> executableLines, List<HighlightSymbolTableBuilder.SerializableSymbol> serializableSymbols) {
-      this.encodedFileContent = encodedFileContent;
-      this.issues = issues;
-      this.cpdTokens = cpdTokens;
-      this.highlightingTokens = highlightingTokens;
-      this.noSonarLines = noSonarLines;
-      this.metrics = metrics;
-      this.linesOfCode = linesOfCode;
-      this.executableLines = executableLines;
-      this.serializableSymbols = serializableSymbols;
-    }
-  }
-
-  static class SerializableIssue {
-    Integer line;
-    Integer column;
-    Integer endLine;
-    Integer endColumn;
-    String message;
-    RuleKey ruleKey;
-    List<SecondaryIssueLocation> secondaryLocations = new ArrayList<>();
-    Double cost;
-  }
-
-  static class SecondaryIssueLocation {
-    Integer line;
-    Integer column;
-    Integer endLine;
-    Integer endColumn;
-    String message;
   }
 
 }

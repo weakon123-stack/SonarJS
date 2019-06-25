@@ -86,7 +86,7 @@ public class CpdVisitor extends SubscriptionVisitor {
     return tokens;
   }
 
-  public class CpdToken {
+  public static class CpdToken {
     public int[] l;
     public String i;
 

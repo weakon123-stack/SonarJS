@@ -172,7 +172,7 @@ public class HighlighterVisitor extends SubscriptionVisitor {
     return false;
   }
 
-  public class HighlightToken {
+  public static class HighlightToken {
     public int [] l;
     public TypeOfText t;
 
