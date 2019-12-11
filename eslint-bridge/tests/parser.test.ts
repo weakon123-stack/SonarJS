@@ -28,12 +28,14 @@ import {
   checkTypeScriptVersionCompatibility,
   ParseExceptionCode,
   parseExceptionCodeOf,
+  parseVueSourceFileWithTypeScript,
 } from "../src/parser";
 import * as espree from "espree";
 import { SourceCode } from "eslint";
 import { ParsingError } from "../src/analyzer";
 import visit from "../src/utils/visitor";
 import * as path from "path";
+import * as fs from "fs";
 
 describe("parseJavaScriptSourceFile", () => {
   beforeEach(() => {
@@ -91,7 +93,8 @@ describe("parseJavaScriptSourceFile", () => {
     // Modules
     expectToParse(
       `import * as Foo from "foo";
-import { ParseExceptionCode } from '../src/parser';
+import { ParseExceptionCode, parseVueSourceFileWithTypeScript } from '../src/parser';
+import * as fs from 'fs';
        export class A{}`,
     );
   });
@@ -196,6 +199,32 @@ describe("parseTypeScriptSourceFile", () => {
       ParseExceptionCode.UnsupportedTypeScript,
     );
     expect(parseExceptionCodeOf("Unexpected token )")).toEqual(ParseExceptionCode.Parsing);
+  });
+
+  it("should parse JavaScript code with TypeScript compiler", () => {
+    const tsConfig = __dirname + "/fixtures/vue-project/tsconfig.json";
+    const filePath = __dirname + "/fixtures/vue-project/sample.lint.vue";
+    const fileContent = fs.readFileSync(filePath, { encoding: "utf8" });
+    const sourceCode = parseVueSourceFileWithTypeScript(fileContent, filePath, [
+      tsConfig,
+    ]) as SourceCode;
+    expect(sourceCode.ast).toBeDefined();
+    expect(sourceCode.parserServices.program).toBeDefined();
+    const program = sourceCode.parserServices.program;
+    expect(program.getTypeChecker()).toBeDefined();
+  });
+
+  it("should parse TypeScript code with TypeScript compiler", () => {
+    const tsConfig = __dirname + "/fixtures/vue-ts-project/tsconfig.json";
+    const filePath = __dirname + "/fixtures/vue-ts-project/sample.lint.vue";
+    const fileContent = fs.readFileSync(filePath, { encoding: "utf8" });
+    const sourceCode = parseVueSourceFileWithTypeScript(fileContent, filePath, [
+      tsConfig,
+    ]) as SourceCode;
+    expect(sourceCode.ast).toBeDefined();
+    expect(sourceCode.parserServices.program).toBeDefined();
+    const program = sourceCode.parserServices.program;
+    expect(program.getTypeChecker()).toBeDefined();
   });
 });
 

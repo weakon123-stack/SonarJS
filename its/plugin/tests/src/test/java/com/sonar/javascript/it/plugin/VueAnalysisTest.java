@@ -36,8 +36,6 @@ public class VueAnalysisTest {
   @ClassRule
   public static final Orchestrator orchestrator = Tests.ORCHESTRATOR;
 
-  private static final File PROJECT_DIR = TestUtils.projectDir("vue-js-project");
-
   @BeforeClass
   public static void startServer() {
     orchestrator.resetData();
@@ -45,6 +43,7 @@ public class VueAnalysisTest {
 
   @Test
   public void test() {
+    File PROJECT_DIR = TestUtils.projectDir("vue-js-project");
     String projectKey = "vue-js-project";
     SonarScanner build = SonarScanner.create()
       .setProjectKey(projectKey)
@@ -66,5 +65,23 @@ public class VueAnalysisTest {
     assertThat(Tests.getMeasureAsInt(projectKey, "comment_lines")).isEqualTo(1);
     assertThat(Tests.getMeasureAsInt(projectKey, "complexity")).isEqualTo(2);
     assertThat(Tests.getMeasureAsInt(projectKey, "cognitive_complexity")).isEqualTo(2);
+  }
+
+  @Test
+  public void test_with_type() {
+    File PROJECT_DIR = TestUtils.projectDir("vue-js-ts-project");
+    String projectKey = "vue-js-ts-project";
+    SonarScanner build = SonarScanner.create()
+      .setProjectKey(projectKey)
+      .setSourceEncoding("UTF-8")
+      .setSourceDirs(".")
+      .setProjectDir(PROJECT_DIR);
+
+    Tests.setProfile(projectKey, "eslint-based-rules-profile", "js");
+    orchestrator.executeBuild(build);
+
+    List<Issues.Issue> issuesList = getIssues(projectKey);
+    assertThat(issuesList).hasSize(1);
+    assertThat(issuesList.get(0).getLine()).isEqualTo(9);
   }
 }

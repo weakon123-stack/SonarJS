@@ -70,18 +70,8 @@ export function parseJavaScriptSourceFileWithTypeScript(
       project: tsConfigs,
       loggerFn: console.log,
     });
-    console.log(`Successfully parsed JS file ${filePath} with TS compiler`);
     return new SourceCode({ ...result, parserServices: result.services, text: fileContent });
   } catch (exception) {
-    console.log(
-      `Could not parse JS file ${filePath} with TS compiler at line ${
-        exception.lineNumber
-      }. Error: ${exception.message}`,
-    );
-    console.log(`Falling back to JS parsers`);
-    if (fileContent.includes("@flow")) {
-      console.log(`Flow.js file`);
-    }
     return parseJavaScriptSourceFile(fileContent);
   }
 }
@@ -153,6 +143,35 @@ export function checkTypeScriptVersionCompatibility(currentVersion: string) {
 export function unloadTypeScriptEslint() {
   const tsParser = require.resolve("@typescript-eslint/parser");
   delete require.cache[tsParser];
+}
+
+export function parseVueSourceFileWithTypeScript(
+  fileContent: string,
+  filePath: string,
+  tsConfigs?: string[],
+) {
+  try {
+    const result = VueJS.parseForESLint(fileContent, {
+      ...PARSER_CONFIG_MODULE,
+      filePath: filePath,
+      parser: "@typescript-eslint/parser",
+      extraFileExtensions: [".vue"],
+      project: tsConfigs,
+      loggerFn: console.log,
+    });
+    console.log(`Successfully parsed JS file ${filePath} with TS compiler`);
+    return new SourceCode({
+      ...(result as any),
+      parserServices: result.services,
+      text: fileContent,
+    });
+  } catch (exception) {
+    return {
+      line: exception!.lineNumber,
+      message: exception!.message,
+      code: ParseExceptionCode.Parsing,
+    };
+  }
 }
 
 export function parseVueSourceFile(fileContent: string): SourceCode | ParsingError {

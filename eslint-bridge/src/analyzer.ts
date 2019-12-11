@@ -37,6 +37,7 @@ import {
 } from "./runner/symbol-highlighter";
 import * as fs from "fs";
 import { rules as sonarjsRules } from "eslint-plugin-sonarjs";
+import { parseVueSourceFileWithTypeScript } from "./parser";
 
 const COGNITIVE_COMPLEXITY_RULE_ID = "internal-cognitive-complexity";
 
@@ -119,7 +120,9 @@ export function analyzeJavaScript(input: AnalysisInput): AnalysisResponse {
 export function analyzeJavaScriptWithTypeScript(input: AnalysisInput): AnalysisResponse {
   return analyze(
     input,
-    input.filePath.endsWith(".vue") ? parseVueSourceFile : parseJavaScriptSourceFileWithTypeScript,
+    input.filePath.endsWith(".vue")
+      ? parseVueSourceFileWithTypeScript
+      : parseJavaScriptSourceFileWithTypeScript,
   );
 }
 
