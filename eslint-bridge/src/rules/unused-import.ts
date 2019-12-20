@@ -26,6 +26,7 @@ const EXCLUDED_IMPORTS = ["React"];
 
 export const rule: Rule.RuleModule = {
   create(context: Rule.RuleContext) {
+    const flowTypeIdentifiers: Set<string> = new Set();
     const unusedImports: estree.Identifier[] = [];
     return {
       ImportDeclaration: (node: estree.Node) => {
@@ -36,17 +37,34 @@ export const rule: Rule.RuleModule = {
           }
         }
       },
+      "Identifier[typeAnnotation]": (node: estree.Node) => {
+        let annotation = (node as any).typeAnnotation;
+        if (annotation.typeAnnotation) {
+          annotation = annotation.typeAnnotation;
+          if (annotation.type === "GenericTypeAnnotation") {
+            const identifier = annotation.id;
+            if (identifier.type === "Identifier") {
+              flowTypeIdentifiers.add(identifier.name);
+            }
+          }
+        }
+      },
       "Program:exit": () => {
         const jsxIdentifiers = context
           .getSourceCode()
           .ast.tokens.filter(token => token.type === "JSXIdentifier")
           .map(token => token.value);
-        unusedImports.filter(unused => !jsxIdentifiers.includes(unused.name)).forEach(unused =>
-          context.report({
-            message: `Remove this unused import of '${unused.name}'.`,
-            node: unused,
-          }),
-        );
+        unusedImports
+          .filter(
+            unused =>
+              !jsxIdentifiers.includes(unused.name) && !flowTypeIdentifiers.has(unused.name),
+          )
+          .forEach(unused =>
+            context.report({
+              message: `Remove this unused import of '${unused.name}'.`,
+              node: unused,
+            }),
+          );
       },
     };
   },

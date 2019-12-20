@@ -63,8 +63,9 @@ ruleTester.run("Unnecessary imports should be removed", rule, {
     },
     {
       code: `
+      /* @flow */
       import type { a } from 'b';
-      function f(c: a) {}
+      export const c = (d: a): e => {}
       `,
     },
   ],
