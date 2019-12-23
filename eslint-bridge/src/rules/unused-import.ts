@@ -26,26 +26,17 @@ const EXCLUDED_IMPORTS = ["React"];
 
 export const rule: Rule.RuleModule = {
   create(context: Rule.RuleContext) {
-    const flowTypeIdentifiers: Set<string> = new Set();
     const unusedImports: estree.Identifier[] = [];
     return {
-      ImportDeclaration: (node: estree.Node) => {
+      "Program": () => {
+        const sourceCode = context.getSourceCode();
+        console.log(sourceCode);
+      },
+      "ImportDeclaration": (node: estree.Node) => {
         const variables = context.getDeclaredVariables(node);
         for (const variable of variables) {
           if (!EXCLUDED_IMPORTS.includes(variable.name) && variable.references.length === 0) {
             unusedImports.push(variable.identifiers[0]);
-          }
-        }
-      },
-      "Identifier[typeAnnotation]": (node: estree.Node) => {
-        let annotation = (node as any).typeAnnotation;
-        if (annotation.typeAnnotation) {
-          annotation = annotation.typeAnnotation;
-          if (annotation.type === "GenericTypeAnnotation") {
-            const identifier = annotation.id;
-            if (identifier.type === "Identifier") {
-              flowTypeIdentifiers.add(identifier.name);
-            }
           }
         }
       },
@@ -54,17 +45,12 @@ export const rule: Rule.RuleModule = {
           .getSourceCode()
           .ast.tokens.filter(token => token.type === "JSXIdentifier")
           .map(token => token.value);
-        unusedImports
-          .filter(
-            unused =>
-              !jsxIdentifiers.includes(unused.name) && !flowTypeIdentifiers.has(unused.name),
-          )
-          .forEach(unused =>
-            context.report({
-              message: `Remove this unused import of '${unused.name}'.`,
-              node: unused,
-            }),
-          );
+        unusedImports.filter(unused => !jsxIdentifiers.includes(unused.name)).forEach(unused =>
+          context.report({
+            message: `Remove this unused import of '${unused.name}'.`,
+            node: unused,
+          }),
+        );
       },
     };
   },

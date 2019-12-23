@@ -18,6 +18,7 @@
  * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 import { RuleTester } from "eslint";
+import * as fs from "fs";
 
 const ruleTester = new RuleTester({
   parserOptions: { ecmaVersion: 2018, sourceType: "module" },
@@ -27,91 +28,97 @@ import { rule } from "../../src/rules/unused-import";
 
 ruleTester.run("Unnecessary imports should be removed", rule, {
   valid: [
+    // {
+    //   code: `
+    //   import a from 'b';
+    //   console.log(a);
+    //   `,
+    // },
+    // {
+    //   code: `
+    //   import { a } from 'b';
+    //   console.log(a);
+    //   `,
+    // },
+    // {
+    //   code: `
+    //   import { a, b } from 'c';
+    //   console.log(a);
+    //   console.log(b);
+    //   `,
+    // },
+    // {
+    //   code: `
+    //   import { a as b } from 'c';
+    //   console.log(b);
+    //   `,
+    // },
+    // {
+    //   code: `import React from 'react';`,
+    // },
+    // {
+    //   code: `
+    //   import { a } from 'b';
+    //   <a />
+    //   `,
+    // },
+    // {
+    //   code: `
+    //   /* @flow */
+    //   import type { a } from 'b';
+    //   export const c = (d: a): e => {}
+    //   `,
+    // },
     {
-      code: `
-      import a from 'b';
-      console.log(a);
-      `,
-    },
-    {
-      code: `
-      import { a } from 'b';
-      console.log(a);
-      `,
-    },
-    {
-      code: `
-      import { a, b } from 'c';
-      console.log(a);
-      console.log(b);
-      `,
-    },
-    {
-      code: `
-      import { a as b } from 'c';
-      console.log(b);
-      `,
-    },
-    {
-      code: `import React from 'react';`,
-    },
-    {
-      code: `
-      import { a } from 'b';
-      <a />
-      `,
-    },
-    {
-      code: `
-      /* @flow */
-      import type { a } from 'b';
-      export const c = (d: a): e => {}
-      `,
+      code: fs.readFileSync(
+        "/Users/yassin/Development/sonar-js/its/sources/src/babylon/src/index.js",
+        { encoding: "utf8" },
+      ),
     },
   ],
   invalid: [
-    {
-      code: `import a from 'b';`,
-      errors: [
-        {
-          message: `Remove this unused import of 'a'.`,
-          line: 1,
-          endLine: 1,
-          column: 8,
-          endColumn: 9,
-        },
-      ],
-    },
-    {
-      code: `import { a } from 'b';`,
-      errors: 1,
-    },
-    {
-      code: `import { a, b } from 'c';`,
-      errors: 2,
-    },
-    {
-      code: `
-      import { a, b } from 'c';
-      console.log(b);
-      `,
-      errors: 1,
-    },
-    {
-      code: `import * as a from 'b';`,
-      errors: 1,
-    },
-    {
-      code: `import { a as b } from 'c';`,
-      errors: 1,
-    },
-    {
-      code: `import typeof a from 'b';`,
-      errors: 1,
-    },
-    {
-      code: `import React, { Component } from 'react';`,
-      errors: 1,
-    },
+    // {
+    //   code: `import a from 'b';`,
+    //   errors: [
+    //     {
+    //       message: `Remove this unused import of 'a'.`,
+    //       line: 1,
+    //       endLine: 1,
+    //       column: 8,
+    //       endColumn: 9,
+    //     },
+    //   ],
+    // },
+    // {
+    //   code: `import { a } from 'b';`,
+    //   errors: 1,
+    // },
+    // {
+    //   code: `import { a, b } from 'c';`,
+    //   errors: 2,
+    // },
+    // {
+    //   code: `
+    //   import { a, b } from 'c';
+    //   console.log(b);
+    //   `,
+    //   errors: 1,
+    // },
+    // {
+    //   code: `import * as a from 'b';`,
+    //   errors: 1,
+    // },
+    // {
+    //   code: `import { a as b } from 'c';`,
+    //   errors: 1,
+    // },
+    // {
+    //   code: `import typeof a from 'b';`,
+    //   errors: 1,
+    // },
+    // {
+    //   code: `import React, { Component } from 'react';`,
+    //   errors: 1,
+    // },
   ],
 });

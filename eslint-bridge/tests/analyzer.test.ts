@@ -91,6 +91,17 @@ describe("#analyzeJavaScript", () => {
     expect(highlights).toHaveLength(10);
   });
 
+  it("foo", () => {
+    const path = "/Users/yassin/Development/sonar-js/its/sources/src/babylon/src/index.js";
+    const code = fs.readFileSync(path, { encoding: "utf8" });
+    const { issues } = analyzeJavaScript({
+      filePath: path,
+      fileContent: code,
+      rules: [{ key: "unused-import", configurations: [] }],
+    });
+    console.log(issues);
+  });
+
   it("should report cpd tokens", () => {
     const cpdTokens = analyzeJavaScript({
       filePath,
